@@ -3,11 +3,7 @@ import type {
   MarketContext,
   PropertyDetails,
 } from '@/lib/types';
-import {
-  MOCK_COMPARABLES,
-  MOCK_MARKET,
-  MOCK_SUBJECT,
-} from '@/lib/htag/mock';
+import { PROFILES, pickProfile, profileByLocPid } from '@/lib/htag/mock';
 
 export function isMockMode(): boolean {
   return (process.env.MOCK_DATA ?? 'true').toLowerCase() !== 'false';
@@ -26,6 +22,13 @@ export class HtagError extends Error {
 
 function baseUrl(): string {
   return process.env.HTAG_API_BASE_URL ?? 'https://api.prod.htagai.com';
+}
+
+function timeoutMillis(): number {
+  const raw = process.env.HTAG_TIMEOUT_MS;
+  if (!raw) return 10_000;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 10_000;
 }
 
 function authHeaders(): Record<string, string> {
@@ -59,6 +62,9 @@ export async function rawHtagFetch<T = unknown>(
   const method = init.method ?? 'GET';
   const url = `${baseUrl()}${path}`;
   const startedAt = Date.now();
+  const timeoutMs = timeoutMillis();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   let res: Response;
   try {
@@ -66,14 +72,21 @@ export async function rawHtagFetch<T = unknown>(
       ...init,
       headers: { ...authHeaders(), ...(init.headers ?? {}) },
       cache: 'no-store',
+      signal: controller.signal,
     });
   } catch (err) {
     const elapsed = Date.now() - startedAt;
-    logHtag({ method, path, status: 0, ms: elapsed, keys: [], error: String(err) });
+    const aborted =
+      err instanceof Error &&
+      (err.name === 'AbortError' || err.message.includes('aborted'));
+    const reason = aborted ? `timed out after ${timeoutMs}ms` : String(err);
+    logHtag({ method, path, status: 0, ms: elapsed, keys: [], error: reason });
     throw new HtagError(
-      `HTAG ${method} ${path} network error: ${String(err)}`,
+      `HTAG ${method} ${path} ${aborted ? reason : `network error: ${reason}`}`,
       path,
     );
+  } finally {
+    clearTimeout(timer);
   }
 
   if (!res.ok) {
@@ -110,7 +123,11 @@ export async function getSubjectProperty(
   address: string,
 ): Promise<PropertyDetails> {
   if (isMockMode()) {
-    return { ...MOCK_SUBJECT, fullAddress: address || MOCK_SUBJECT.fullAddress };
+    const profile = pickProfile(address);
+    return {
+      ...profile.subject,
+      fullAddress: address || profile.subject.fullAddress,
+    };
   }
 
   // TODO(htag-live): confirm standardise endpoint path and response fields.
@@ -151,7 +168,9 @@ export async function getSubjectProperty(
 export async function getComparables(
   subject: PropertyDetails,
 ): Promise<Comparable[]> {
-  if (isMockMode()) return MOCK_COMPARABLES;
+  if (isMockMode()) {
+    return (profileByLocPid(subject.locPid) ?? PROFILES.baulkham).comparables;
+  }
 
   // TODO(htag-live): confirm the sold-search endpoint path, request body
   // shape (radius / months / property_type), and results field name.
@@ -207,7 +226,9 @@ export async function getComparables(
 export async function getMarketContext(
   subject: PropertyDetails,
 ): Promise<MarketContext> {
-  if (isMockMode()) return MOCK_MARKET;
+  if (isMockMode()) {
+    return (profileByLocPid(subject.locPid) ?? PROFILES.baulkham).market;
+  }
 
   // TODO(htag-live): confirm whether the market endpoints accept loc_pid as
   // a query param or a body field, and confirm response field names. Calls

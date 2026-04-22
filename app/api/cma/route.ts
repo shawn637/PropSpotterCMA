@@ -13,6 +13,7 @@ import {
 import {
   assessVendorMotivation,
   generateNarrative,
+  type TokenUsage,
 } from '@/lib/llm/vendor-motivation';
 import { clientKey, rateLimit } from '@/lib/ratelimit';
 import type { FullValuationResult } from '@/lib/types';
@@ -81,7 +82,8 @@ export async function POST(req: Request) {
       );
     }
 
-    const vendorAssessment = await assessVendorMotivation(listingDescription);
+    const { assessment: vendorAssessment, tokenUsage: vendorUsage } =
+      await assessVendorMotivation(listingDescription);
 
     const maxPrice = computeMaxPrice({
       fairValue: cma.fairValue,
@@ -91,14 +93,15 @@ export async function POST(req: Request) {
       typicalDaysOnMarket: market.typicalDaysOnMarket,
     });
 
-    const narrative = await generateNarrative({
-      subject,
-      market,
-      cma,
-      vendorAssessment,
-      maxPrice,
-      actualDaysOnMarket,
-    });
+    const { text: narrative, tokenUsage: narrativeUsage } =
+      await generateNarrative({
+        subject,
+        market,
+        cma,
+        vendorAssessment,
+        maxPrice,
+        actualDaysOnMarket,
+      });
 
     const payload: FullValuationResult = {
       subject,
@@ -112,6 +115,29 @@ export async function POST(req: Request) {
       requestedAddress: address,
       actualDaysOnMarket,
     };
+
+    logValuation({
+      dataSource: payload.dataSource,
+      suburb: subject.suburb,
+      state: subject.state,
+      locPid: subject.locPid,
+      cycleStage: market.cycleStage,
+      fairValue: cma.fairValue,
+      dispersion: Number(cma.dispersion.toFixed(3)),
+      comparablesUsed: cma.comparables.length,
+      vendor: {
+        motivation: vendorAssessment.motivation,
+        source: vendorAssessment.source,
+        confidence: Number(vendorAssessment.confidence.toFixed(2)),
+      },
+      numbers: {
+        opening: maxPrice.openingOffer,
+        target: maxPrice.targetPrice,
+        walkAway: maxPrice.walkAwayMax,
+      },
+      llmTokens: sumTokens(vendorUsage, narrativeUsage),
+      actualDaysOnMarket,
+    });
 
     return NextResponse.json(payload, { headers: rateLimitHeaders(rl) });
   } catch (err) {
@@ -144,4 +170,37 @@ function rateLimitHeaders(rl: {
     'X-RateLimit-Remaining': String(rl.remaining),
     'X-RateLimit-Reset': String(Math.ceil(rl.resetAt / 1000)),
   };
+}
+
+function sumTokens(
+  a: TokenUsage | undefined,
+  b: TokenUsage | undefined,
+): TokenUsage {
+  return {
+    input: (a?.input ?? 0) + (b?.input ?? 0),
+    output: (a?.output ?? 0) + (b?.output ?? 0),
+  };
+}
+
+/**
+ * Structured JSON log line per completed valuation. No PII — full
+ * address is omitted intentionally. Fields are the ones useful for
+ * usage monitoring and cost tracking. `grep '"tag":"valuation"'` in
+ * Vercel Logs to filter.
+ */
+function logValuation(info: {
+  dataSource: 'mock' | 'live';
+  suburb: string;
+  state: string;
+  locPid: string;
+  cycleStage: string;
+  fairValue: number;
+  dispersion: number;
+  comparablesUsed: number;
+  vendor: { motivation: string; source: 'llm' | 'fallback'; confidence: number };
+  numbers: { opening: number; target: number; walkAway: number };
+  llmTokens: TokenUsage;
+  actualDaysOnMarket?: number;
+}): void {
+  console.log(JSON.stringify({ tag: 'valuation', ...info }));
 }

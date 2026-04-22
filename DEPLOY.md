@@ -155,17 +155,67 @@ Once live is working end-to-end:
 
 ## Phase 4 — Harden for real traffic
 
-In rough priority order.
+### 4.1 HTAG request timeout (DONE)
 
-1. **Upgrade rate limiter to Vercel KV** (currently in-memory).
-   - `npm i @upstash/ratelimit @vercel/kv`, enable KV in Vercel dashboard, swap `lib/ratelimit.ts` to use `Ratelimit.slidingWindow`.
-2. **HTAG edge-case error handling.**
-   - Missing land size → heuristic adjustment already handles this, but log a note.
-   - Empty comparables array → 422 already handles this.
-   - Obscure suburb / no market data → currently throws; convert to a user-friendly 422.
-3. **Replace in-memory mocks with a richer fixture library** — multiple states, unit / townhouse, edge cases.
-4. **Server-side usage logging.** Today the app is fully stateless. Consider logging each valuation's `subject.locPid`, `cma.fairValue`, and token usage to Vercel Logs (structured JSON, no PII in the body) so you can spot patterns.
-5. **Next.js security update.** Repo currently pins `next@14.2.5`, which npm flags for a Dec 2025 CVE. Bump to the latest 14.2.x before going public: `npm i next@^14.2.36` and re-run `npm run build`.
+`HTAG_TIMEOUT_MS` (default 10000) caps every HTAG call with an `AbortController`. Prevents one slow endpoint from consuming the whole 30-second function budget before the LLM calls even start. If real HTAG is slow, raise this, but keep it well under `maxDuration: 30` so the two LLM calls still have room.
+
+### 4.2 Richer mock fixtures (DONE)
+
+`lib/htag/mock.ts` now ships three profiles, routed by address substring so you can smoke-test different market shapes with zero HTAG setup:
+
+| Address contains… | Profile | Cycle | Fair value (mock) |
+|---|---|---|---|
+| `"Baulkham"` (default) | NSW231 Baulkham Hills | Rising | ~$526k |
+| `"Stanhope"` | NSW3682 Stanhope Gardens | Peaking | ~$1.16M |
+| `"Correction"` | NSWCORR Correction Springs | Correction | ~$720k |
+
+Use them to verify cycle / velocity stretch behaviours before live HTAG is wired. The cycle=Correction profile also exercises the "walk-away floored at fair value" branch.
+
+### 4.3 Per-valuation structured logging (DONE)
+
+Each successful `/api/cma` response emits one `console.log` line with `tag: "valuation"` and the fields below — no PII (address omitted). Grep-friendly in Vercel Logs.
+
+```jsonc
+{
+  "tag": "valuation",
+  "dataSource": "live",
+  "suburb": "Baulkham Hills",
+  "state": "NSW",
+  "locPid": "NSW231",
+  "cycleStage": "Rising",
+  "fairValue": 1234567,
+  "dispersion": 0.042,
+  "comparablesUsed": 8,
+  "vendor": { "motivation": "Motivated", "source": "llm", "confidence": 0.6 },
+  "numbers": { "opening": 1160000, "target": 1234567, "walkAway": 1271000 },
+  "llmTokens": { "input": 850, "output": 142 },
+  "actualDaysOnMarket": 19
+}
+```
+
+HTAG calls separately emit `tag: "htag"` lines (endpoint / status / elapsed / response keys). Together these are enough to monitor volume, cost, and data quality.
+
+### 4.4 Next.js CVE bump (DONE)
+
+Next bumped to 14.2.35 (from 14.2.5). The original Dec-2025 advisory is patched.
+
+There are still 4 high-severity npm audit findings that `npm audit fix --force` would only resolve by upgrading to Next 16, which is a breaking change we shouldn't take during hardening. All four are server-side DoS-style advisories:
+
+| Advisory | Applicability to this app |
+|---|---|
+| Image Optimizer DoS via remotePatterns | Not applicable — we don't use `next/image` remote patterns. |
+| HTTP request smuggling in rewrites | Not applicable — no rewrites configured. |
+| `next/image` disk cache exhaustion | Not applicable — we don't use `next/image`. |
+| RSC deserialization DoS + Server Components DoS | Low risk behind the password gate; attack surface is small. |
+
+Track them but plan the Next 15/16 upgrade for a dedicated branch once the app is live and we've established usage patterns.
+
+### 4.5 Deferred (do when real traffic justifies it)
+
+- **Upstash + Vercel KV rate limiter.** `lib/ratelimit.ts` is in-memory: a cold start resets counters and horizontally-scaled instances each have their own. Swap to `@upstash/ratelimit` on `Ratelimit.slidingWindow` once the per-IP accidentals pattern shows up or real multi-instance scaling happens.
+- **HTAG edge-case UX.** Currently: missing optional fields → heuristic adjustment handles gracefully (Phase 1); empty comparables → 422 (Phase 1); obscure suburb / missing market data → HtagError → 502 with endpoint (Phase 3). Consider converting "no market data" specifically into a user-friendly 422 with a suggested alternative.
+- **Richer fixture types.** Current mocks are all Houses. Add Unit / Townhouse profiles once live HTAG proves those paths are exercised.
+- **Long-term persistence.** If reports ever need to be retrievable, add a database. Until then the stateless model is intentional.
 
 ---
 
@@ -180,6 +230,7 @@ In rough priority order.
 | `HTAG_API_BASE_URL` | live HTAG only | `https://api.prod.htagai.com` | Override if HTAG moves. |
 | `CLAUDE_MODEL` | tuning | `claude-sonnet-4-6` | Swap for `claude-haiku-4-5-20251001` for ~3× cheaper. |
 | `RATE_LIMIT_PER_MINUTE` | tuning | `20` | Per-IP requests / minute on both API routes. |
+| `HTAG_TIMEOUT_MS` | tuning | `10000` | Per-HTAG-call timeout. Keep well under `maxDuration: 30` for /api/cma so LLM calls have room. |
 
 ---
 
@@ -196,3 +247,5 @@ In rough priority order.
 | `501 htag-debug is only meaningful when MOCK_DATA=false` | You hit the debug endpoint while still in mock mode. Set `MOCK_DATA=false` + `HTAG_API_KEY` and redeploy. |
 | PDF downloads as a 0-byte file | Usually a `renderToBuffer` crash. Check Vercel Logs on `/api/pdf`. |
 | Vercel function times out | Hobby-plan 10s cap, or `maxDuration: 30` in `vercel.json` + slow HTAG upstream. Either bump the plan or swap `CLAUDE_MODEL` to Haiku. |
+| `HTAG ... timed out after 10000ms` | One endpoint exceeded `HTAG_TIMEOUT_MS`. Either raise the env var (keep it well under 30s) or probe with `/api/htag-debug` to see which endpoint is slow. |
+| Valuation logs missing `llmTokens` counts | Anthropic call fell back to heuristic (no API key, or the call errored). `llmTokens` will be `{input:0,output:0}` in that case; check for preceding `console.warn` lines in Vercel Logs. |

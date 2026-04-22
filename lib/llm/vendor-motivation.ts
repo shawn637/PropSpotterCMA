@@ -9,6 +9,21 @@ import type {
   VendorMotivation,
 } from '@/lib/types';
 
+export interface TokenUsage {
+  input: number;
+  output: number;
+}
+
+export interface VendorAssessmentResult {
+  assessment: VendorAssessment;
+  tokenUsage?: TokenUsage;
+}
+
+export interface NarrativeResult {
+  text: string;
+  tokenUsage?: TokenUsage;
+}
+
 const DEFAULT_MODEL = 'claude-sonnet-4-6';
 
 function model(): string {
@@ -65,21 +80,24 @@ const VENDOR_TOOL: Anthropic.Tool = {
 
 export async function assessVendorMotivation(
   listingDescription: string | undefined,
-): Promise<VendorAssessment> {
+): Promise<VendorAssessmentResult> {
   const description = (listingDescription ?? '').trim();
 
   if (!description) {
     return {
-      motivation: 'Standard',
-      confidence: 0.3,
-      rationale: 'No listing description provided; defaulting to Standard vendor.',
-      triggerPhrases: [],
-      source: 'fallback',
+      assessment: {
+        motivation: 'Standard',
+        confidence: 0.3,
+        rationale:
+          'No listing description provided; defaulting to Standard vendor.',
+        triggerPhrases: [],
+        source: 'fallback',
+      },
     };
   }
 
   if (!hasApiKey()) {
-    return heuristicVendorAssessment(description);
+    return { assessment: heuristicVendorAssessment(description) };
   }
 
   try {
@@ -98,10 +116,17 @@ export async function assessVendorMotivation(
       ],
     });
 
+    const tokenUsage: TokenUsage = {
+      input: response.usage.input_tokens,
+      output: response.usage.output_tokens,
+    };
+
     const toolUse = response.content.find(
       (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use',
     );
-    if (!toolUse) return heuristicVendorAssessment(description);
+    if (!toolUse) {
+      return { assessment: heuristicVendorAssessment(description), tokenUsage };
+    }
     const input = toolUse.input as Record<string, unknown>;
     const motivation = normaliseMotivation(input.motivation);
     const confidence = clamp01(Number(input.confidence ?? 0.5));
@@ -115,15 +140,21 @@ export async function assessVendorMotivation(
       : [];
 
     return {
-      motivation,
-      confidence,
-      rationale,
-      triggerPhrases,
-      source: 'llm',
+      assessment: {
+        motivation,
+        confidence,
+        rationale,
+        triggerPhrases,
+        source: 'llm',
+      },
+      tokenUsage,
     };
   } catch (error) {
-    console.warn('assessVendorMotivation LLM call failed; using heuristic fallback.', error);
-    return heuristicVendorAssessment(description);
+    console.warn(
+      'assessVendorMotivation LLM call failed; using heuristic fallback.',
+      error,
+    );
+    return { assessment: heuristicVendorAssessment(description) };
   }
 }
 
@@ -134,8 +165,8 @@ export async function generateNarrative(args: {
   vendorAssessment: VendorAssessment;
   maxPrice: MaxPriceResult;
   actualDaysOnMarket?: number;
-}): Promise<string> {
-  if (!hasApiKey()) return fallbackNarrative(args);
+}): Promise<NarrativeResult> {
+  if (!hasApiKey()) return { text: fallbackNarrative(args) };
 
   const prompt = `${BRAND_RULES}
 
@@ -173,11 +204,19 @@ Data:
       .join('\n')
       .trim();
 
-    if (!text) return fallbackNarrative(args);
-    return sanitiseProhibitedTerms(text);
+    const tokenUsage: TokenUsage = {
+      input: response.usage.input_tokens,
+      output: response.usage.output_tokens,
+    };
+
+    if (!text) return { text: fallbackNarrative(args), tokenUsage };
+    return { text: sanitiseProhibitedTerms(text), tokenUsage };
   } catch (error) {
-    console.warn('generateNarrative LLM call failed; using fallback prose.', error);
-    return fallbackNarrative(args);
+    console.warn(
+      'generateNarrative LLM call failed; using fallback prose.',
+      error,
+    );
+    return { text: fallbackNarrative(args) };
   }
 }
 
