@@ -3,9 +3,11 @@ export type CycleStage = 'Recovery' | 'Rising' | 'Peaking' | 'Correction';
 export type VendorMotivation = 'Standard' | 'Motivated' | 'Distressed';
 
 /**
- * Structured attributes extracted from a listing photo by Claude Vision.
- * All fields optional-with-'unknown' because the model should not have
- * to guess when the façade isn't visible or the angle is ambiguous.
+ * Structured attributes extracted by Claude Vision from the complete
+ * set of listing photos (façade + interiors + backyard), not just one
+ * image. All fields optional-with-'unknown' / 'not_visible' because the
+ * model should not have to guess when the relevant room or feature
+ * isn't pictured.
  */
 export type StoreyCount = 'single' | 'double' | 'multi' | 'unknown';
 export type ConstructionMaterial =
@@ -21,15 +23,63 @@ export type ConditionGrade =
   | 'renovated'
   | 'new'
   | 'unknown';
+/**
+ * Room-specific condition grade. Adds 'not_visible' for the case where
+ * a listing doesn't include an interior shot of that room — which
+ * happens often enough for bathrooms that we don't want to fold it
+ * into 'unknown' (which means "visible but ambiguous").
+ */
+export type RoomCondition = ConditionGrade | 'not_visible';
 export type RoofType = 'tile' | 'metal' | 'unknown';
+
+export type LandQuality =
+  | 'neglected'
+  | 'basic'
+  | 'landscaped'
+  | 'premium'
+  | 'unknown';
+export type BackyardSize = 'none' | 'small' | 'medium' | 'large' | 'unknown';
+
+/**
+ * Open-enum visual feature tags. The model is free to emit any of the
+ * listed feature strings when the photos show them. Kept as an open
+ * string[] rather than strict enums because REA listings surface a
+ * long tail of features we don't want to enumerate exhaustively.
+ */
+export type VisualFeature =
+  | 'pool'
+  | 'view'
+  | 'renovation'
+  | 'modern_kitchen'
+  | 'modern_bathroom'
+  | 'outdoor_entertaining'
+  | 'fireplace'
+  | 'solar'
+  | 'air_conditioning'
+  | 'granny_flat'
+  | 'corner_block'
+  | 'main_road'
+  | 'near_powerlines'
+  | 'mature_trees';
 
 export interface VisionAttributes {
   storeys: StoreyCount;
   constructionMaterial: ConstructionMaterial;
+  /**
+   * Overall condition synthesised across ALL photos (façade, kitchen,
+   * bathroom, living areas, grounds). A listing whose kitchen is
+   * pristine but whose bathroom is dated sits at 'average'; uniformly
+   * pristine sits at 'renovated' or 'new'.
+   */
   conditionGrade: ConditionGrade;
+  kitchenCondition: RoomCondition;
+  bathroomCondition: RoomCondition;
+  landQuality: LandQuality;
+  backyardSize: BackyardSize;
+  features: VisualFeature[];
   roofType: RoofType;
   notes: string;
-  imageUrl: string;
+  imageUrls: string[];
 }
 
 export interface PropertyDetails {

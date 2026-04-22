@@ -30,12 +30,16 @@ export const maxDuration = 30;
  *   {
  *     status: 'DONE',
  *     finished: true,
- *     matched: [{addressKey, imageUrl, matchReason}],
- *     subjectMatch: {addressKey, imageUrl, matchReason} | null,
+ *     matched: [{addressKey, imageUrl, imageUrls, matchReason}],
+ *     subjectMatch: {addressKey, imageUrl, imageUrls, matchReason} | null,
  *     unmatchedAddressKeys: [...],
  *     totalListings: { sold: number, buy: number },
  *     errors: { sold?: string, buy?: string }
  *   }
+ *
+ * `imageUrl` is the hero; `imageUrls` is the full gallery (hero first,
+ * capped at MAX_IMAGES_PER_LISTING) that gets fed into the multi-image
+ * Claude Vision pass.
  */
 const PollRequest = z.object({
   sold: z

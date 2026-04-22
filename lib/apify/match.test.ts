@@ -7,6 +7,7 @@ import {
   buildReaBuyUrl,
   buildReaSearchUrl,
   buildReaSoldUrl,
+  extractAllImageUrls,
   extractHeroImageUrl,
   matchListingsToComps,
   normaliseAddress,
@@ -122,6 +123,81 @@ test('extractHeroImageUrl: empty / malformed input returns undefined', () => {
     extractHeroImageUrl([{ name: 'floorplan', file: 'https://x.com/fp.jpg' }]),
     undefined,
   );
+});
+
+// ---------------------------------------------------------------------------
+// extractAllImageUrls — full gallery for multi-image Vision pass
+// ---------------------------------------------------------------------------
+
+test('extractAllImageUrls: returns all non-floorplan/video REA photos, main first', () => {
+  const urls = extractAllImageUrls([
+    { name: 'photo', file: 'https://i3.au.reastatic.net/b.jpg' },
+    { name: 'floorplan', file: 'https://i3.au.reastatic.net/fp.jpg' },
+    { name: 'main photo', file: 'https://i3.au.reastatic.net/main.jpg' },
+    { name: 'photo', file: 'https://i3.au.reastatic.net/c.jpg' },
+    { name: 'video', file: 'https://img.youtube.com/vid/0.jpg' },
+  ]);
+  assert.deepEqual(urls, [
+    'https://i3.au.reastatic.net/main.jpg',
+    'https://i3.au.reastatic.net/b.jpg',
+    'https://i3.au.reastatic.net/c.jpg',
+  ]);
+});
+
+test('extractAllImageUrls: de-duplicates and caps to MAX_IMAGES_PER_LISTING', () => {
+  // 15 distinct photos — cap should bring us down to 10.
+  const many = Array.from({ length: 15 }, (_, i) => ({
+    name: 'photo',
+    file: `https://i3.au.reastatic.net/p-${i}.jpg`,
+  }));
+  const urls = extractAllImageUrls(many);
+  assert.equal(urls.length, 10);
+  assert.equal(urls[0], 'https://i3.au.reastatic.net/p-0.jpg');
+});
+
+test('extractAllImageUrls: skips non-REA-CDN URLs', () => {
+  const urls = extractAllImageUrls([
+    { name: 'photo', file: 'https://tracking-pixel.com/t.gif' },
+    { name: 'main photo', file: 'https://i3.au.reastatic.net/main.jpg' },
+  ]);
+  assert.deepEqual(urls, ['https://i3.au.reastatic.net/main.jpg']);
+});
+
+test('matchListingsToComps: MatchResult carries imageUrls[] for multi-image vision', () => {
+  const listing: ReaScraperListing = {
+    address: {
+      streetAddress: '10 Test Street',
+      suburb: 'Stanhope Gardens',
+      postcode: '2768',
+      state: 'NSW',
+    },
+    price: { display: '$1,000,000' },
+    dateSold: { value: '2026-04-01' },
+    images: [
+      { name: 'main photo', file: 'https://i3.au.reastatic.net/hero.jpg' },
+      { name: 'photo', file: 'https://i3.au.reastatic.net/kitchen.jpg' },
+      { name: 'photo', file: 'https://i3.au.reastatic.net/bath.jpg' },
+    ],
+  };
+  const result = matchListingsToComps(
+    [
+      {
+        addressKey: 'K',
+        fullAddress: '10 Test Street, Stanhope Gardens NSW 2768',
+        salePrice: 1_000_000,
+        saleDateIso: '2026-04-01',
+        propertyType: 'House',
+      },
+    ],
+    [listing],
+  );
+  assert.equal(result.comps.length, 1);
+  assert.equal(result.comps[0].imageUrl, 'https://i3.au.reastatic.net/hero.jpg');
+  assert.deepEqual(result.comps[0].imageUrls, [
+    'https://i3.au.reastatic.net/hero.jpg',
+    'https://i3.au.reastatic.net/kitchen.jpg',
+    'https://i3.au.reastatic.net/bath.jpg',
+  ]);
 });
 
 // ---------------------------------------------------------------------------

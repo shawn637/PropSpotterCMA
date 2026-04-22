@@ -99,10 +99,18 @@ export function CMAResult({
   // manually excluded from the running CMA.
   const [excluded, setExcluded] = useState<Set<string>>(new Set());
 
-  // Per-comp (+ subject) image URLs the user has pasted. Used by the
-  // "Refine visuals" button to POST /api/vision; survive across
-  // recomputes so the user doesn't have to re-enter.
+  // Per-comp (+ subject) HERO image URL — used for PDF thumbnails and
+  // the UI URL field. Either auto-populated by the Apify matcher or
+  // pasted by the user.
   const [imageUrls, setImageUrls] = useState<Record<string, string>>({});
+  // Per-comp (+ subject) FULL image gallery from the Apify scrape.
+  // Keyed the same way; values are string[] (hero first). Vision calls
+  // pass the whole array so the model sees kitchen + bathroom +
+  // backyard, not just the façade. Falls back to [imageUrls[key]] when
+  // the user only pasted one URL manually.
+  const [listingImageUrls, setListingImageUrls] = useState<
+    Record<string, string[]>
+  >({});
   // Vision results keyed by addressKey (SUBJECT_KEY for the subject).
   const [visionMap, setVisionMap] = useState<Record<string, VisionAttributes>>(
     {},
@@ -195,26 +203,32 @@ export function CMAResult({
     setAnalyzing(true);
     setVisionError(null);
     try {
-      const subjectUrl = imageUrls[SUBJECT_KEY]?.trim();
+      // Prefer the full gallery from the Apify matcher; fall back to
+      // the single manually-pasted URL when only that is available.
+      const urlsFor = (key: string): string[] => {
+        const gallery = listingImageUrls[key];
+        if (gallery && gallery.length > 0) return gallery;
+        const single = (imageUrls[key] ?? '').trim();
+        return single ? [single] : [];
+      };
+
+      const subjectUrls = urlsFor(SUBJECT_KEY);
       const compEntries = originalComps
         .filter((c) => !excluded.has(c.addressKey))
-        .map((c) => ({
-          addressKey: c.addressKey,
-          imageUrl: (imageUrls[c.addressKey] ?? '').trim(),
-        }))
-        .filter((e) => e.imageUrl.length > 0);
+        .map((c) => ({ addressKey: c.addressKey, imageUrls: urlsFor(c.addressKey) }))
+        .filter((e) => e.imageUrls.length > 0);
 
-      if (!subjectUrl && compEntries.length === 0) {
+      if (subjectUrls.length === 0 && compEntries.length === 0) {
         setVisionError('Paste at least one image URL first.');
         setAnalyzing(false);
         return;
       }
 
       const body: Record<string, unknown> = { comps: compEntries };
-      if (subjectUrl) {
+      if (subjectUrls.length > 0) {
         body.subject = {
           addressKey: subject.addressKey,
-          imageUrl: subjectUrl,
+          imageUrls: subjectUrls,
         };
       }
 
@@ -338,6 +352,7 @@ export function CMAResult({
       type Match = {
         addressKey: string;
         imageUrl: string;
+        imageUrls: string[];
         matchReason: 'address' | 'price+date';
       };
       let matched: Match[] = [];
@@ -383,12 +398,19 @@ export function CMAResult({
         );
       }
 
-      // 3. Merge matched image URLs into imageUrls state (subject uses
-      //    the special SUBJECT_KEY so the UI's subject URL input shows it).
+      // 3. Merge matched image URLs into state. imageUrls holds the
+      //    HERO for PDF/UI; listingImageUrls holds the full gallery
+      //    that feeds the Vision call.
       setImageUrls((prev) => {
         const next = { ...prev };
         for (const m of matched) next[m.addressKey] = m.imageUrl;
         if (subjectMatch) next[SUBJECT_KEY] = subjectMatch.imageUrl;
+        return next;
+      });
+      setListingImageUrls((prev) => {
+        const next = { ...prev };
+        for (const m of matched) next[m.addressKey] = m.imageUrls;
+        if (subjectMatch) next[SUBJECT_KEY] = subjectMatch.imageUrls;
         return next;
       });
       setAutoFetchUnmatched(unmatched);
@@ -396,14 +418,18 @@ export function CMAResult({
 
       // 4. Chain straight into Claude Vision. Include subject match if
       //    we found one — the subject's visual attrs are half the
-      //    similarity comparison.
-      const visionTargets: Array<{ addressKey: string; imageUrl: string }> = [
-        ...matched,
-      ];
+      //    similarity comparison. Feed the FULL gallery per listing
+      //    (not just the hero) so the model sees kitchen + bathroom +
+      //    backyard together.
+      const visionTargets: Array<{ addressKey: string; imageUrls: string[] }> =
+        matched.map((m) => ({
+          addressKey: m.addressKey,
+          imageUrls: m.imageUrls,
+        }));
       if (subjectMatch) {
         visionTargets.push({
           addressKey: SUBJECT_KEY,
-          imageUrl: subjectMatch.imageUrl,
+          imageUrls: subjectMatch.imageUrls,
         });
       }
       if (visionTargets.length > 0) {
@@ -417,15 +443,14 @@ export function CMAResult({
 
   /**
    * Chain: after auto-fetch succeeds, run the vision analysis on the
-   * fresh URLs without waiting for a state-update round trip. Subject
-   * entries (addressKey === SUBJECT_KEY) are split out into the
-   * /api/vision body's `subject` field so the server routes them to
-   * the subject slot in the response — they then land in visionMap
-   * under SUBJECT_KEY, which is what deriveVisualAdjustment reads for
-   * the subject side of each comp comparison.
+   * fresh URL gallery per listing without waiting for a state-update
+   * round trip. Each target carries ALL photos for that listing so
+   * Claude can synthesise across kitchen, bathroom, backyard, façade.
+   * Subject entries (addressKey === SUBJECT_KEY) are split out into
+   * the /api/vision body's `subject` field.
    */
   async function analyzeImagesDirect(
-    targets: Array<{ addressKey: string; imageUrl: string }>,
+    targets: Array<{ addressKey: string; imageUrls: string[] }>,
   ) {
     if (targets.length === 0) return;
     setAnalyzing(true);
@@ -437,13 +462,13 @@ export function CMAResult({
       const body: Record<string, unknown> = {
         comps: compTargets.map((c) => ({
           addressKey: c.addressKey,
-          imageUrl: c.imageUrl,
+          imageUrls: c.imageUrls,
         })),
       };
       if (subjectTarget) {
         body.subject = {
           addressKey: subject.addressKey,
-          imageUrl: subjectTarget.imageUrl,
+          imageUrls: subjectTarget.imageUrls,
         };
       }
 
@@ -891,16 +916,28 @@ function VisionBadges({ attrs }: { attrs?: VisionAttributes }) {
   if (attrs.storeys !== 'unknown') parts.push(attrs.storeys);
   if (attrs.constructionMaterial !== 'unknown')
     parts.push(attrs.constructionMaterial);
-  if (attrs.conditionGrade !== 'unknown') parts.push(attrs.conditionGrade);
+  if (attrs.conditionGrade !== 'unknown')
+    parts.push(`overall ${attrs.conditionGrade}`);
+  if (
+    attrs.kitchenCondition !== 'unknown' &&
+    attrs.kitchenCondition !== 'not_visible'
+  )
+    parts.push(`kitchen ${attrs.kitchenCondition}`);
+  if (
+    attrs.bathroomCondition !== 'unknown' &&
+    attrs.bathroomCondition !== 'not_visible'
+  )
+    parts.push(`bath ${attrs.bathroomCondition}`);
+  if (attrs.landQuality !== 'unknown') parts.push(`land ${attrs.landQuality}`);
+  if (attrs.backyardSize !== 'unknown')
+    parts.push(`yard ${attrs.backyardSize}`);
+  for (const f of attrs.features) parts.push(f.replace(/_/g, ' '));
   if (parts.length === 0) return <span className="text-slate-400">unknown</span>;
   return (
     <span className="text-teal">
       {parts.join(' · ')}
       {attrs.notes ? (
-        <span
-          className="ml-1 text-slate-400"
-          title={attrs.notes}
-        >
+        <span className="ml-1 text-slate-400" title={attrs.notes}>
           ⓘ
         </span>
       ) : null}

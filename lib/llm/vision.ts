@@ -1,11 +1,15 @@
 import Anthropic from '@anthropic-ai/sdk';
 
 import type {
+  BackyardSize,
   ConditionGrade,
   ConstructionMaterial,
+  LandQuality,
   RoofType,
+  RoomCondition,
   StoreyCount,
   VisionAttributes,
+  VisualFeature,
 } from '@/lib/types';
 
 const DEFAULT_MODEL = 'claude-sonnet-4-6';
@@ -29,49 +33,73 @@ PropSpotter provides research, comparable market analysis, and educational tools
 
 const VISION_SYSTEM_PROMPT = `${BRAND_RULES}
 
-Your task: classify the physical attributes of a residential property from a single listing photo.
+Your task: classify the physical attributes of a residential property from the COMPLETE set of listing photos provided — façade, kitchen, bathroom, living areas, backyard, grounds, and any other visible rooms or features. Synthesise across all photos. A single photo is never enough; weigh every image before deciding.
 
-Return one tool call with your best assessment. When the façade is not
-clearly visible, the angle is wrong, or the image shows only the interior,
-use 'unknown' for that field rather than guessing. "unknown" is a first-
-class value — unconfident guesses are worse than no guess.
+Return one tool call with your best assessment. Use 'unknown' when a feature is visible but ambiguous, and 'not_visible' for room-specific fields when no photo of that room was included. "unknown" and "not_visible" are first-class values — unconfident guesses are worse than no guess.
 
 Field definitions:
 
 - storeys:
   * single       — one main living level above ground
   * double       — two main living levels (standard Australian two-storey)
-  * multi        — three or more levels (rare for freestanding houses)
-  * unknown      — can't tell from this angle (e.g. interior-only photo)
+  * multi        — three or more levels
+  * unknown      — can't tell from the set of photos
 
-- construction_material (primary external wall material):
+- construction_material (primary external wall material, from façade/grounds shots):
   * brick        — face brick, brick veneer
   * render       — rendered / painted masonry (Hebel, painted brick)
-  * weatherboard — timber cladding (horizontal boards)
+  * weatherboard — timber cladding
   * fibro        — fibre-cement sheeting (older post-war stock)
-  * mixed        — two or more of the above across the main elevation
+  * mixed        — two or more of the above across the elevation
   * unknown      — can't tell
 
-- condition_grade:
-  * new          — obviously new construction, pristine finishes
-  * renovated    — recent update evident (modern windows, paint, landscaping)
+- condition_grade (OVERALL condition synthesised across façade, kitchen, bathroom, living, grounds — not just the façade):
+  * new          — obviously new construction, pristine finishes throughout
+  * renovated    — recent update evident (modern kitchen/bathroom, fresh paint, landscaping)
   * average      — maintained, neither new nor tired
-  * poor         — visible deterioration, dated finishes, needs work
-  * unknown      — can't tell
+  * poor         — visible deterioration or dated finishes in multiple areas
+  * unknown      — insufficient photos to judge
+
+- kitchen_condition (condition of the KITCHEN specifically, from kitchen photos):
+  * new / renovated / average / poor — same scale as condition_grade
+  * unknown      — kitchen visible but ambiguous
+  * not_visible  — no kitchen photo provided
+
+- bathroom_condition (condition of the BATHROOM specifically):
+  * new / renovated / average / poor — same scale
+  * unknown      — bathroom visible but ambiguous
+  * not_visible  — no bathroom photo provided
+
+- land_quality (grounds / garden / yard, from exterior shots):
+  * neglected    — bare dirt, dead lawn, no landscaping
+  * basic        — functional lawn, minimal beds, basic fencing
+  * landscaped   — established garden beds, healthy lawn, decent fencing
+  * premium      — manicured, mature trees, designer landscaping, entertaining areas
+  * unknown      — no exterior / yard shots
+
+- backyard_size (relative size of usable backyard):
+  * none         — essentially no backyard (townhouse / courtyard)
+  * small        — small courtyard or kids' play area
+  * medium       — standard suburban backyard
+  * large        — generous backyard / acreage feel
+  * unknown      — not pictured
+
+- features: array of short tags for anything notable that affects value. Only include tags you are reasonably confident about. Use these exact strings:
+  pool, view, renovation, modern_kitchen, modern_bathroom, outdoor_entertaining,
+  fireplace, solar, air_conditioning, granny_flat, corner_block, main_road,
+  near_powerlines, mature_trees
 
 - roof_type:
   * tile         — concrete or terracotta tiles
   * metal        — Colorbond / corrugated sheet
   * unknown      — not visible
 
-- notes: one short sentence flagging anything unusual (e.g. "heritage
-  frontage", "recent second-storey addition", "corner block"). Keep under
-  20 words.`;
+- notes: one or two short sentences flagging anything unusual that the structured fields don't capture (e.g. "heritage frontage", "recent second-storey addition", "pool needs resurfacing", "outdated but structurally sound"). Under 40 words.`;
 
 const VISION_TOOL: Anthropic.Tool = {
   name: 'classify_property_facade',
   description:
-    'Record your classification of the property shown in the photo. Always call this tool; do not respond with prose.',
+    'Record your classification of the property shown across ALL provided listing photos. Always call this tool; do not respond with prose.',
   input_schema: {
     type: 'object',
     properties: {
@@ -87,6 +115,44 @@ const VISION_TOOL: Anthropic.Tool = {
         type: 'string',
         enum: ['new', 'renovated', 'average', 'poor', 'unknown'],
       },
+      kitchen_condition: {
+        type: 'string',
+        enum: ['new', 'renovated', 'average', 'poor', 'unknown', 'not_visible'],
+      },
+      bathroom_condition: {
+        type: 'string',
+        enum: ['new', 'renovated', 'average', 'poor', 'unknown', 'not_visible'],
+      },
+      land_quality: {
+        type: 'string',
+        enum: ['neglected', 'basic', 'landscaped', 'premium', 'unknown'],
+      },
+      backyard_size: {
+        type: 'string',
+        enum: ['none', 'small', 'medium', 'large', 'unknown'],
+      },
+      features: {
+        type: 'array',
+        items: {
+          type: 'string',
+          enum: [
+            'pool',
+            'view',
+            'renovation',
+            'modern_kitchen',
+            'modern_bathroom',
+            'outdoor_entertaining',
+            'fireplace',
+            'solar',
+            'air_conditioning',
+            'granny_flat',
+            'corner_block',
+            'main_road',
+            'near_powerlines',
+            'mature_trees',
+          ],
+        },
+      },
       roof_type: {
         type: 'string',
         enum: ['tile', 'metal', 'unknown'],
@@ -97,55 +163,101 @@ const VISION_TOOL: Anthropic.Tool = {
       'storeys',
       'construction_material',
       'condition_grade',
+      'kitchen_condition',
+      'bathroom_condition',
+      'land_quality',
+      'backyard_size',
+      'features',
       'roof_type',
       'notes',
     ],
   },
 };
 
-export interface AnalyzeFacadeResult {
+export interface AnalyzeListingResult {
   attrs: VisionAttributes | null;
   error?: string;
   tokenUsage?: { input: number; output: number };
+  /** How many of the submitted URLs we actually sent to Claude (fetches can fail per image). */
+  imagesSent?: number;
 }
 
+/** Max images to send per listing. Cap protects token spend; 10 is
+ *  enough to see hero + kitchen + bathroom + at least one other interior
+ *  + backyard + street on a typical REA listing. */
+const MAX_VISION_IMAGES_PER_CALL = 10;
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024; // 8 MB — Anthropic's per-image limit
+const FETCH_TIMEOUT_MS = 10_000;
+
 /**
- * Run Claude Vision on a single listing photo URL. Returns structured
- * VisionAttributes via forced tool use, or { attrs: null, error } if
- * the call failed (bad URL, Anthropic outage, malformed tool_use).
- *
- * Idempotent and pure-ish: same URL + same model gives the same answer
- * within any single call, though vision classifications are not
- * deterministic across calls (they're temperature-sampled).
+ * Run Claude Vision on the full set of photos for ONE listing — subject
+ * or comparable. The model synthesises across every image in the set
+ * so the resulting VisionAttributes reflects kitchen + bathroom +
+ * grounds, not just the façade. Returns { attrs: null, error } if the
+ * call failed (all images unreachable, Anthropic outage, malformed
+ * tool_use).
  */
-export async function analyzeFacade(
-  imageUrl: string,
-): Promise<AnalyzeFacadeResult> {
+export async function analyzeListing(
+  imageUrls: string[],
+): Promise<AnalyzeListingResult> {
   if (!hasApiKey()) {
     return { attrs: null, error: 'ANTHROPIC_API_KEY not set' };
   }
-  if (!imageUrl || !/^https?:\/\//i.test(imageUrl)) {
-    return { attrs: null, error: 'imageUrl must be an http(s) URL' };
+  if (!Array.isArray(imageUrls) || imageUrls.length === 0) {
+    return { attrs: null, error: 'imageUrls must be a non-empty array' };
   }
 
-  let imageBase64: string;
-  let mediaType: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
-  try {
-    const fetched = await fetchImage(imageUrl);
-    imageBase64 = fetched.base64;
-    mediaType = fetched.mediaType;
-  } catch (err) {
+  // Deduplicate and cap.
+  const deduped: string[] = [];
+  const seen = new Set<string>();
+  for (const u of imageUrls) {
+    if (typeof u !== 'string' || !/^https?:\/\//i.test(u)) continue;
+    if (seen.has(u)) continue;
+    seen.add(u);
+    deduped.push(u);
+    if (deduped.length >= MAX_VISION_IMAGES_PER_CALL) break;
+  }
+  if (deduped.length === 0) {
+    return { attrs: null, error: 'no valid http(s) image URLs supplied' };
+  }
+
+  // Fetch all images in parallel. Individual failures are tolerated —
+  // as long as AT LEAST ONE image makes it through, the Vision call
+  // still runs (just on a smaller set).
+  const fetched = await Promise.all(
+    deduped.map(async (url) => {
+      try {
+        const img = await fetchImage(url);
+        return { url, ...img };
+      } catch {
+        return null;
+      }
+    }),
+  );
+  const usable = fetched.filter(
+    (f): f is { url: string; base64: string; mediaType: ImageMediaType } =>
+      f !== null,
+  );
+  if (usable.length === 0) {
     return {
       attrs: null,
-      error: `could not fetch image: ${err instanceof Error ? err.message : String(err)}`,
+      error: 'could not fetch any of the supplied image URLs',
     };
   }
 
   try {
     const client = makeClient();
+    const imageBlocks: Anthropic.ImageBlockParam[] = usable.map((u) => ({
+      type: 'image',
+      source: {
+        type: 'base64',
+        media_type: u.mediaType,
+        data: u.base64,
+      },
+    }));
     const response = await client.messages.create({
       model: model(),
-      max_tokens: 800,
+      max_tokens: 1200,
       system: VISION_SYSTEM_PROMPT,
       tools: [VISION_TOOL],
       tool_choice: { type: 'tool', name: VISION_TOOL.name },
@@ -153,17 +265,10 @@ export async function analyzeFacade(
         {
           role: 'user',
           content: [
-            {
-              type: 'image',
-              source: {
-                type: 'base64',
-                media_type: mediaType,
-                data: imageBase64,
-              },
-            },
+            ...imageBlocks,
             {
               type: 'text',
-              text: 'Classify the property shown in this listing photo.',
+              text: `Classify this property using all ${usable.length} listing photo(s) above. Synthesise across every image — do not over-weight any single shot. Respond with one tool call.`,
             },
           ],
         },
@@ -179,7 +284,12 @@ export async function analyzeFacade(
       (b): b is Anthropic.ToolUseBlock => b.type === 'tool_use',
     );
     if (!toolUse) {
-      return { attrs: null, error: 'no tool_use block in response', tokenUsage };
+      return {
+        attrs: null,
+        error: 'no tool_use block in response',
+        tokenUsage,
+        imagesSent: usable.length,
+      };
     }
 
     const input = toolUse.input as Record<string, unknown>;
@@ -187,28 +297,33 @@ export async function analyzeFacade(
       storeys: normaliseStoreys(input.storeys),
       constructionMaterial: normaliseMaterial(input.construction_material),
       conditionGrade: normaliseCondition(input.condition_grade),
+      kitchenCondition: normaliseRoomCondition(input.kitchen_condition),
+      bathroomCondition: normaliseRoomCondition(input.bathroom_condition),
+      landQuality: normaliseLandQuality(input.land_quality),
+      backyardSize: normaliseBackyardSize(input.backyard_size),
+      features: normaliseFeatures(input.features),
       roofType: normaliseRoof(input.roof_type),
       notes:
         typeof input.notes === 'string'
           ? input.notes.trim().slice(0, 400)
           : '',
-      imageUrl,
+      imageUrls: usable.map((u) => u.url),
     };
-    return { attrs, tokenUsage };
+    return { attrs, tokenUsage, imagesSent: usable.length };
   } catch (err) {
     return {
       attrs: null,
       error: err instanceof Error ? err.message : String(err),
+      imagesSent: usable.length,
     };
   }
 }
 
-const MAX_IMAGE_BYTES = 8 * 1024 * 1024; // 8 MB — Anthropic's per-image limit
-const FETCH_TIMEOUT_MS = 10_000;
+type ImageMediaType = 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
 
 async function fetchImage(imageUrl: string): Promise<{
   base64: string;
-  mediaType: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
+  mediaType: ImageMediaType;
 }> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
@@ -217,7 +332,6 @@ async function fetchImage(imageUrl: string): Promise<{
     res = await fetch(imageUrl, {
       signal: controller.signal,
       headers: {
-        // Some listing CDNs reject fetches without a browser-like UA.
         'User-Agent':
           'Mozilla/5.0 PropSpotterCMA/1.0 (+https://propspotter.com.au)',
       },
@@ -245,19 +359,12 @@ async function fetchImage(imageUrl: string): Promise<{
 function inferMediaType(
   contentType: string,
   url: string,
-):
-  | 'image/jpeg'
-  | 'image/png'
-  | 'image/gif'
-  | 'image/webp'
-  | null {
+): ImageMediaType | null {
   if (contentType.includes('jpeg') || contentType.includes('jpg'))
     return 'image/jpeg';
   if (contentType.includes('png')) return 'image/png';
   if (contentType.includes('gif')) return 'image/gif';
   if (contentType.includes('webp')) return 'image/webp';
-  // Fall back to extension-based sniff when the CDN doesn't set a
-  // useful content-type.
   const lower = url.toLowerCase().split('?')[0];
   if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
   if (lower.endsWith('.png')) return 'image/png';
@@ -292,8 +399,68 @@ function normaliseCondition(raw: unknown): ConditionGrade {
   return 'unknown';
 }
 
+function normaliseRoomCondition(raw: unknown): RoomCondition {
+  const s = String(raw ?? '').toLowerCase();
+  if (s === 'not_visible') return 'not_visible';
+  return normaliseCondition(s);
+}
+
+function normaliseLandQuality(raw: unknown): LandQuality {
+  const s = String(raw ?? '').toLowerCase();
+  if (s === 'neglected' || s === 'basic' || s === 'landscaped' || s === 'premium')
+    return s;
+  return 'unknown';
+}
+
+function normaliseBackyardSize(raw: unknown): BackyardSize {
+  const s = String(raw ?? '').toLowerCase();
+  if (s === 'none' || s === 'small' || s === 'medium' || s === 'large') return s;
+  return 'unknown';
+}
+
+const FEATURE_WHITELIST: ReadonlySet<VisualFeature> = new Set<VisualFeature>([
+  'pool',
+  'view',
+  'renovation',
+  'modern_kitchen',
+  'modern_bathroom',
+  'outdoor_entertaining',
+  'fireplace',
+  'solar',
+  'air_conditioning',
+  'granny_flat',
+  'corner_block',
+  'main_road',
+  'near_powerlines',
+  'mature_trees',
+]);
+
+function normaliseFeatures(raw: unknown): VisualFeature[] {
+  if (!Array.isArray(raw)) return [];
+  const out: VisualFeature[] = [];
+  const seen = new Set<string>();
+  for (const r of raw) {
+    const s = String(r ?? '').toLowerCase();
+    if (!FEATURE_WHITELIST.has(s as VisualFeature)) continue;
+    if (seen.has(s)) continue;
+    seen.add(s);
+    out.push(s as VisualFeature);
+  }
+  return out;
+}
+
 function normaliseRoof(raw: unknown): RoofType {
   const s = String(raw ?? '').toLowerCase();
   if (s === 'tile' || s === 'metal') return s;
   return 'unknown';
+}
+
+/**
+ * Back-compat shim — older callers passed a single imageUrl. Just wrap
+ * and delegate.
+ */
+export async function analyzeFacade(
+  imageUrl: string,
+): Promise<AnalyzeListingResult> {
+  return analyzeListing([imageUrl]);
 }

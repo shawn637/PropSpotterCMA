@@ -54,12 +54,21 @@ All in `lib/cma/compute.ts`.
 - Apply HTAG's `htagAdjustmentFactor` if supplied, else a heuristic based
   on land size / floor area / bed / bath / carspaces / year built /
   (optional) Claude Vision attributes. Clamped to [0.7, 1.3].
-- **Claude Vision leg** (optional): when the user pastes a façade photo
-  URL for the subject and comps in the UI, `lib/llm/vision.ts` extracts
-  storey count / construction material / condition / roof type per image.
-  `deriveVisualAdjustment` in compute.ts factors those into the
-  similarity multiplier (storey mismatch ±8%, material ±5%, condition
-  ±8%). See also `app/api/vision/route.ts`.
+- **Claude Vision leg** (optional but auto-fired when Apify is configured):
+  `lib/llm/vision.ts` runs ONE multi-image Claude call per listing,
+  feeding up to 10 photos (façade + kitchen + bathroom + living +
+  backyard + grounds) so the model synthesises across the full gallery
+  rather than classifying a single street shot. The tool schema
+  captures storeys, construction material, overall condition, kitchen
+  condition, bathroom condition, land quality (neglected → premium),
+  backyard size, plus a feature tag list (pool, view, renovation,
+  main_road, near_powerlines, mature_trees, etc.). See
+  `app/api/vision/route.ts` for batching and
+  `deriveVisualAdjustment` in compute.ts for the scoring: storey ±7%,
+  material ±4%, overall condition ±6%, kitchen ±6%, bathroom ±4%, land
+  quality ±4%, backyard size ±3%, feature stack ±6%, overall clamp
+  [0.80, 1.20]. Cost is ~$0.05 per listing (~$0.50 per valuation with
+  10 comps + subject).
 - Fair value = median of implied values. Low = 25th pctile, High = 75th.
 - Need ≥ 3 comparables after filtering; the route returns 422 if not.
 - The UI lets the user **exclude** individual comps and the CMA +

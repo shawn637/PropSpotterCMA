@@ -1,13 +1,17 @@
 import type {
+  BackyardSize,
   Comparable,
   ComparableWithDerived,
   CMAResult,
   ConditionGrade,
   ConstructionMaterial,
+  LandQuality,
   MarketContext,
   PropertyDetails,
+  RoomCondition,
   StoreyCount,
   VisionAttributes,
+  VisualFeature,
 } from '@/lib/types';
 
 const INDEXING_CAP_MONTHS = 12;
@@ -94,7 +98,7 @@ export function deriveHeuristicAdjustment(
 
 /**
  * Pure visual adjustment derived from a pair of Claude-Vision-extracted
- * VisionAttributes. Returns a multiplier in [0.85, 1.15]:
+ * VisionAttributes. Returns a multiplier in [0.80, 1.20]:
  *   factor > 1  → comparable is structurally WORSE than subject (its
  *                 sale price understates the subject's value; uplift)
  *   factor < 1  → comparable is structurally BETTER than subject
@@ -102,6 +106,13 @@ export function deriveHeuristicAdjustment(
  *
  * Returns 1.0 if either side is missing, so unseen properties are not
  * penalised.
+ *
+ * The Vision pass sees kitchen + bathroom + backyard + façade, not just
+ * the street shot, so the signal here is materially richer than a
+ * façade-only classifier. Weights below reflect Australian market
+ * price sensitivity — kitchen and bathroom condition are the biggest
+ * interior drivers, followed by overall condition, then landscaping,
+ * with individual feature tags (pool/view/main road) stacking on top.
  */
 export function deriveVisualAdjustment(
   subjectAttrs: VisionAttributes | undefined,
@@ -110,34 +121,83 @@ export function deriveVisualAdjustment(
   if (!subjectAttrs || !compAttrs) return 1;
   let factor = 1;
 
-  // Storeys: single vs double has a meaningful price delta. Use the
-  // comp-to-subject difference in storey count.
+  // Storeys: single vs double has a meaningful price delta — though
+  // floor-area tends to price most of it already, the visual signal
+  // still helps when floor area is missing on either side.
   const storeyDelta =
     storeyOrdinal(subjectAttrs.storeys) - storeyOrdinal(compAttrs.storeys);
   if (storeyDelta !== 0) {
-    factor *= 1 + clamp(storeyDelta * 0.07, -0.08, 0.08);
+    factor *= 1 + clamp(storeyDelta * 0.06, -0.07, 0.07);
   }
 
-  // Construction material: brick is the Australian benchmark for new
-  // builds; fibro and weatherboard typically trade at a discount for
-  // post-1980s stock. Subject better than comp → uplift.
+  // Construction material: brick is the Australian benchmark; fibro
+  // and weatherboard trade at a discount for post-1980s stock. Lighter
+  // weight than before — material rarely moves price by more than a
+  // few percent once condition is accounted for.
   const matDelta =
     materialScore(subjectAttrs.constructionMaterial) -
     materialScore(compAttrs.constructionMaterial);
   if (matDelta !== 0) {
-    factor *= 1 + clamp(matDelta * 0.025, -0.05, 0.05);
+    factor *= 1 + clamp(matDelta * 0.02, -0.04, 0.04);
   }
 
-  // Condition grade: biggest single visual driver of delta. Ranges
+  // Overall condition grade (synthesised across all photos). Ranges
   // from poor (-2) to new (+2).
   const condDelta =
     conditionScore(subjectAttrs.conditionGrade) -
     conditionScore(compAttrs.conditionGrade);
   if (condDelta !== 0) {
-    factor *= 1 + clamp(condDelta * 0.03, -0.08, 0.08);
+    factor *= 1 + clamp(condDelta * 0.025, -0.06, 0.06);
   }
 
-  return clamp(factor, 0.85, 1.15);
+  // Kitchen condition: biggest single interior driver. A renovated
+  // kitchen vs a dated one is commonly ±5-8% on its own in Australian
+  // suburban markets. Weighted the heaviest of the room-specific
+  // fields. 'not_visible' on either side → skip this leg (neutral).
+  const kitchenDelta = roomConditionScoreDelta(
+    subjectAttrs.kitchenCondition,
+    compAttrs.kitchenCondition,
+  );
+  if (kitchenDelta != null) {
+    factor *= 1 + clamp(kitchenDelta * 0.025, -0.06, 0.06);
+  }
+
+  // Bathroom condition: second-largest interior driver, roughly half
+  // the weight of kitchen.
+  const bathroomDelta = roomConditionScoreDelta(
+    subjectAttrs.bathroomCondition,
+    compAttrs.bathroomCondition,
+  );
+  if (bathroomDelta != null) {
+    factor *= 1 + clamp(bathroomDelta * 0.015, -0.04, 0.04);
+  }
+
+  // Landscaping / land quality. A premium, landscaped block vs a
+  // neglected yard is meaningful but not as much as interior condition.
+  const landDelta =
+    landQualityScore(subjectAttrs.landQuality) -
+    landQualityScore(compAttrs.landQuality);
+  if (landDelta !== 0) {
+    factor *= 1 + clamp(landDelta * 0.015, -0.04, 0.04);
+  }
+
+  // Backyard size. Mostly captured by land area elsewhere but the
+  // signal helps when land area is missing or when land size doesn't
+  // reflect usable yard (e.g. battle-axe blocks).
+  const backyardDelta =
+    backyardScore(subjectAttrs.backyardSize) -
+    backyardScore(compAttrs.backyardSize);
+  if (backyardDelta !== 0) {
+    factor *= 1 + clamp(backyardDelta * 0.015, -0.03, 0.03);
+  }
+
+  // Feature stack — each feature contributes a small multiplicative
+  // bump or drag. Asymmetry between subject and comp is what matters:
+  // if subject has a pool and comp doesn't, subject's implied value
+  // should be higher than comp's sale suggests.
+  factor *= featureAsymmetryFactor(subjectAttrs.features, compAttrs.features);
+
+  return clamp(factor, 0.8, 1.2);
 }
 
 function storeyOrdinal(s: StoreyCount): number {
@@ -182,6 +242,102 @@ function conditionScore(c: ConditionGrade): number {
     default:
       return 0; // unknown — neutral
   }
+}
+
+/**
+ * Room-level condition delta. Returns null when either side is
+ * 'not_visible' or 'unknown' — signals "no reliable signal" and the
+ * caller should skip that leg entirely rather than pretend both sides
+ * are 'average'.
+ */
+function roomConditionScoreDelta(
+  subject: RoomCondition,
+  comp: RoomCondition,
+): number | null {
+  if (
+    subject === 'not_visible' ||
+    comp === 'not_visible' ||
+    subject === 'unknown' ||
+    comp === 'unknown'
+  ) {
+    return null;
+  }
+  return conditionScore(subject) - conditionScore(comp);
+}
+
+function landQualityScore(q: LandQuality): number {
+  switch (q) {
+    case 'premium':
+      return 2;
+    case 'landscaped':
+      return 1;
+    case 'basic':
+      return 0;
+    case 'neglected':
+      return -2;
+    default:
+      return 0;
+  }
+}
+
+function backyardScore(b: BackyardSize): number {
+  switch (b) {
+    case 'large':
+      return 2;
+    case 'medium':
+      return 1;
+    case 'small':
+      return 0;
+    case 'none':
+      return -1;
+    default:
+      return 0;
+  }
+}
+
+/**
+ * Each feature carries a small multiplicative bump (positive) or drag
+ * (negative). The factor applied is the NET difference between subject
+ * and comp feature sets: if both have a pool it cancels out; if only
+ * the subject has a pool, the subject's implied value gets uplift
+ * relative to the comp's sale price.
+ */
+const FEATURE_WEIGHTS: Record<VisualFeature, number> = {
+  pool: 0.025,
+  view: 0.03,
+  renovation: 0.02,
+  modern_kitchen: 0.015,
+  modern_bathroom: 0.01,
+  outdoor_entertaining: 0.01,
+  fireplace: 0.005,
+  solar: 0.005,
+  air_conditioning: 0.005,
+  granny_flat: 0.02,
+  corner_block: 0.005,
+  main_road: -0.03,
+  near_powerlines: -0.02,
+  mature_trees: 0.005,
+};
+
+function featureAsymmetryFactor(
+  subjectFeatures: VisualFeature[],
+  compFeatures: VisualFeature[],
+): number {
+  const subj = new Set(subjectFeatures);
+  const comp = new Set(compFeatures);
+  let delta = 0;
+  // Features present only on subject → uplift subject.
+  for (const f of subj) {
+    if (!comp.has(f)) delta += FEATURE_WEIGHTS[f] ?? 0;
+  }
+  // Features present only on comp → discount subject (comp's sale
+  // price carried a premium that subject doesn't match).
+  for (const f of comp) {
+    if (!subj.has(f)) delta -= FEATURE_WEIGHTS[f] ?? 0;
+  }
+  // Cap the feature stack so pool + view + renovation don't compound
+  // beyond ±6%.
+  return 1 + clamp(delta, -0.06, 0.06);
 }
 
 /**

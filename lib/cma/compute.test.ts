@@ -216,9 +216,14 @@ function visionAttrs(overrides: Partial<VisionAttributes> = {}): VisionAttribute
     storeys: 'single',
     constructionMaterial: 'brick',
     conditionGrade: 'average',
+    kitchenCondition: 'average',
+    bathroomCondition: 'average',
+    landQuality: 'basic',
+    backyardSize: 'medium',
+    features: [],
     roofType: 'tile',
     notes: '',
-    imageUrl: 'https://example.com/img.jpg',
+    imageUrls: ['https://example.com/img.jpg'],
     ...overrides,
   };
 }
@@ -259,21 +264,80 @@ test('deriveVisualAdjustment: brick subject vs fibro comp → factor > 1', () =>
   assert.ok(f > 1, `expected factor > 1, got ${f}`);
 });
 
-test('deriveVisualAdjustment: combined storey + material + condition stays clamped to [0.85, 1.15]', () => {
-  // Worst-case comp: bigger, nicer, better material.
+test('deriveVisualAdjustment: worst-case composite stays clamped to [0.80, 1.20]', () => {
+  // Comp has everything subject doesn't: better storey, material,
+  // condition, kitchen, bathroom, land, backyard, plus a pool and a
+  // view.
   const subject = visionAttrs({
     storeys: 'single',
     constructionMaterial: 'fibro',
     conditionGrade: 'poor',
+    kitchenCondition: 'poor',
+    bathroomCondition: 'poor',
+    landQuality: 'neglected',
+    backyardSize: 'none',
+    features: ['main_road'],
   });
   const comp = visionAttrs({
     storeys: 'double',
     constructionMaterial: 'brick',
     conditionGrade: 'new',
+    kitchenCondition: 'new',
+    bathroomCondition: 'new',
+    landQuality: 'premium',
+    backyardSize: 'large',
+    features: ['pool', 'view', 'renovation'],
   });
   const f = deriveVisualAdjustment(subject, comp);
-  assert.ok(f >= 0.85 && f <= 1.15, `factor ${f} must be clamped to [0.85, 1.15]`);
+  assert.ok(f >= 0.8 && f <= 1.2, `factor ${f} must be clamped to [0.80, 1.20]`);
   assert.ok(f < 1, 'better comp discounts implied value');
+});
+
+test('deriveVisualAdjustment: renovated kitchen subject vs poor kitchen comp → factor > 1', () => {
+  const subject = visionAttrs({ kitchenCondition: 'renovated' });
+  const comp = visionAttrs({ kitchenCondition: 'poor' });
+  const f = deriveVisualAdjustment(subject, comp);
+  assert.ok(f > 1, `expected factor > 1, got ${f}`);
+});
+
+test('deriveVisualAdjustment: not_visible kitchen on either side → kitchen leg skipped', () => {
+  // Kitchen leg should go neutral when we lack the photo; the rest of
+  // the visionAttrs defaults are equal so overall factor must be 1.
+  const f = deriveVisualAdjustment(
+    visionAttrs({ kitchenCondition: 'not_visible' }),
+    visionAttrs({ kitchenCondition: 'new' }),
+  );
+  assert.equal(f, 1);
+});
+
+test('deriveVisualAdjustment: subject with pool vs comp without → factor > 1', () => {
+  const subject = visionAttrs({ features: ['pool'] });
+  const comp = visionAttrs({ features: [] });
+  const f = deriveVisualAdjustment(subject, comp);
+  assert.ok(f > 1, `expected uplift for subject-only pool, got ${f}`);
+});
+
+test('deriveVisualAdjustment: shared pool feature cancels out', () => {
+  // Both have a pool; everything else equal. Factor should be 1.
+  const f = deriveVisualAdjustment(
+    visionAttrs({ features: ['pool'] }),
+    visionAttrs({ features: ['pool'] }),
+  );
+  assert.equal(f, 1);
+});
+
+test('deriveVisualAdjustment: subject on a main road takes a drag', () => {
+  const subject = visionAttrs({ features: ['main_road'] });
+  const comp = visionAttrs({ features: [] });
+  const f = deriveVisualAdjustment(subject, comp);
+  assert.ok(f < 1, `expected discount for main-road subject, got ${f}`);
+});
+
+test('deriveVisualAdjustment: premium landscaped subject vs neglected comp → factor > 1', () => {
+  const subject = visionAttrs({ landQuality: 'premium' });
+  const comp = visionAttrs({ landQuality: 'neglected' });
+  const f = deriveVisualAdjustment(subject, comp);
+  assert.ok(f > 1, `expected uplift for better landscaping, got ${f}`);
 });
 
 test('deriveVisualAdjustment: unknown storey / material / condition → neutral', () => {

@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 
-import { analyzeFacade } from '@/lib/llm/vision';
+import { analyzeListing } from '@/lib/llm/vision';
 import { clientKey, rateLimit } from '@/lib/ratelimit';
 import type { VisionAttributes } from '@/lib/types';
 
@@ -9,42 +9,56 @@ export const runtime = 'nodejs';
 export const maxDuration = 60;
 
 /**
- * Batch-analyze facade photos. Each image → one Claude Vision call.
- * Called from the CMAResult review UI after the user pastes image URLs
- * against comps and (optionally) the subject.
+ * Batch-analyze listing photos. ONE Claude Vision call per target
+ * (subject or comp), each call bundling up to ~10 images from that
+ * listing so the model can see kitchen + bathroom + backyard + façade
+ * together before classifying. Called from the CMAResult review UI
+ * once the Apify scrape has populated per-listing image URL arrays.
  *
- * Cost note: each image ≈ 2k input + ~200 output tokens on Sonnet 4.6,
- * or roughly US$0.01 per image. A typical request of 1 subject + 10
- * comps is ≈ US$0.07. The per-IP rate limit (20/min by default)
- * already applies via the shared ratelimit module.
+ * Cost note: each listing call is ~10 images × ~1500 input tokens =
+ * ~15k input tokens + ~300 output on Sonnet 4.6, or roughly US$0.05
+ * per listing. A typical request of 1 subject + 10 comps is ≈ US$0.50.
+ * Per-IP rate limit (20/min by default) still applies.
+ *
+ * Back-compat: a target with `imageUrl: string` (singular) is treated
+ * as a length-1 `imageUrls` array.
  */
+const TargetSchema = z
+  .object({
+    addressKey: z.string().min(1),
+    imageUrls: z.array(z.string().url()).min(1).max(20).optional(),
+    imageUrl: z.string().url().optional(),
+  })
+  .refine((t) => (t.imageUrls && t.imageUrls.length > 0) || !!t.imageUrl, {
+    message: 'must supply imageUrls[] or imageUrl',
+  });
+
 const VisionRequest = z.object({
-  subject: z
-    .object({
-      addressKey: z.string().min(1),
-      imageUrl: z.string().url(),
-    })
-    .optional(),
-  comps: z
-    .array(
-      z.object({
-        addressKey: z.string().min(1),
-        imageUrl: z.string().url(),
-      }),
-    )
-    .max(12),
+  subject: TargetSchema.optional(),
+  comps: z.array(TargetSchema).max(12),
 });
 
 interface CompVisionResult {
   addressKey: string;
   attrs: VisionAttributes | null;
   error?: string;
+  imagesSent?: number;
 }
 
 interface VisionResponse {
-  subject?: { attrs: VisionAttributes | null; error?: string };
+  subject?: {
+    attrs: VisionAttributes | null;
+    error?: string;
+    imagesSent?: number;
+  };
   comps: CompVisionResult[];
   totalTokens: { input: number; output: number };
+}
+
+function urlsFor(t: z.infer<typeof TargetSchema>): string[] {
+  if (t.imageUrls && t.imageUrls.length > 0) return t.imageUrls;
+  if (t.imageUrl) return [t.imageUrl];
+  return [];
 }
 
 export async function POST(req: Request) {
@@ -84,12 +98,12 @@ export async function POST(req: Request) {
   const { subject, comps } = parsed.data;
 
   // Fire all vision calls in parallel. Promise.all keeps the response
-  // shape deterministic in input order; per-image failures are captured
+  // shape deterministic in input order; per-listing failures surface
   // as { attrs: null, error } rather than rejecting the whole batch.
   const subjectPromise = subject
-    ? analyzeFacade(subject.imageUrl)
+    ? analyzeListing(urlsFor(subject))
     : Promise.resolve(null);
-  const compPromises = comps.map((c) => analyzeFacade(c.imageUrl));
+  const compPromises = comps.map((c) => analyzeListing(urlsFor(c)));
 
   const [subjectResult, ...compResults] = await Promise.all([
     subjectPromise,
@@ -106,7 +120,11 @@ export async function POST(req: Request) {
   };
 
   const subjectOut = subjectResult
-    ? { attrs: subjectResult.attrs, error: subjectResult.error }
+    ? {
+        attrs: subjectResult.attrs,
+        error: subjectResult.error,
+        imagesSent: subjectResult.imagesSent,
+      }
     : undefined;
   if (subjectResult) tally(subjectResult.tokenUsage);
 
@@ -116,6 +134,7 @@ export async function POST(req: Request) {
       addressKey: comps[i].addressKey,
       attrs: r.attrs,
       error: r.error,
+      imagesSent: r.imagesSent,
     };
   });
 
@@ -125,14 +144,14 @@ export async function POST(req: Request) {
     totalTokens: { input: totalInput, output: totalOutput },
   };
 
-  // Structured log line: grep '"tag":"vision"' in Vercel logs to see
-  // per-request image count + token spend.
   console.log(
     JSON.stringify({
       tag: 'vision',
       compCount: comps.length,
       hasSubject: !!subject,
       failedComps: compsOut.filter((c) => c.attrs == null).length,
+      subjectImagesSent: subjectOut?.imagesSent,
+      compImagesSent: compsOut.map((c) => c.imagesSent),
       tokens: payload.totalTokens,
     }),
   );

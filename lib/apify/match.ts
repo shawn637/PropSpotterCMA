@@ -150,22 +150,58 @@ export function normaliseAddress(raw: string | undefined): string {
 
 /**
  * Pull the hero facade image out of an REA listing's `images` array.
- * Skips floorplans and videos; prefers the main photo.
+ * Skips floorplans and videos; prefers the main photo. Still used for
+ * the PDF hero + UI thumbnail — the multi-image Vision pass uses
+ * extractAllImageUrls instead.
  */
 export function extractHeroImageUrl(
   images: ReaScraperListing['images'],
 ): string | undefined {
-  if (!images || !Array.isArray(images)) return undefined;
+  const all = extractAllImageUrls(images);
+  // extractAllImageUrls already puts the main photo first when present.
+  return all[0];
+}
+
+/**
+ * Return every non-floorplan / non-video photo URL from an REA
+ * listing, main photo first. Capped at MAX_IMAGES_PER_LISTING so a
+ * listing with 40 staged photos doesn't blow past Claude's vision
+ * token budget. Skips images hosted off the REA CDN as a defensive
+ * move against the scraper occasionally returning tracking pixels or
+ * partner ads inline.
+ */
+export const MAX_IMAGES_PER_LISTING = 10;
+
+export function extractAllImageUrls(
+  images: ReaScraperListing['images'],
+): string[] {
+  if (!images || !Array.isArray(images)) return [];
   const candidates = images.filter(
-    (i) =>
+    (i): i is { name?: string; file: string } =>
       typeof i?.file === 'string' &&
       i.file.startsWith('https://i3.au.reastatic.net/') &&
       i.name !== 'floorplan' &&
       i.name !== 'video',
   );
-  const main = candidates.find((i) => i.name === 'main photo');
-  if (main?.file) return main.file;
-  return candidates[0]?.file;
+  const mainIdx = candidates.findIndex((i) => i.name === 'main photo');
+  const ordered =
+    mainIdx > 0
+      ? [
+          candidates[mainIdx],
+          ...candidates.slice(0, mainIdx),
+          ...candidates.slice(mainIdx + 1),
+        ]
+      : candidates;
+  // De-dupe URLs (REA occasionally repeats the hero in the strip).
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const c of ordered) {
+    if (seen.has(c.file)) continue;
+    seen.add(c.file);
+    out.push(c.file);
+    if (out.length >= MAX_IMAGES_PER_LISTING) break;
+  }
+  return out;
 }
 
 export function parseReaPriceToNumber(display: string | undefined): number | undefined {
@@ -178,7 +214,15 @@ export function parseReaPriceToNumber(display: string | undefined): number | und
 
 export interface MatchResult {
   addressKey: string;
+  /** Hero image — used for PDF thumbnails + UI display. */
   imageUrl: string;
+  /**
+   * Full set of non-floorplan / non-video photos from the matched
+   * listing, hero first. Feeds into the multi-image Claude Vision
+   * pass so the model can reason across kitchen + bathroom + backyard
+   * rather than just the façade.
+   */
+  imageUrls: string[];
   matchReason: 'address' | 'price+date';
 }
 
@@ -223,12 +267,13 @@ export function matchListingsToComps(
         l.address.postcode === targetPostcode;
       if (!postcodesMatch) continue;
       if (targetNorm.includes(streetNorm) || streetNorm.includes(targetNorm)) {
-        const imageUrl = extractHeroImageUrl(l.images);
-        if (!imageUrl) continue;
+        const imageUrls = extractAllImageUrls(l.images);
+        if (imageUrls.length === 0) continue;
         used.add(i);
         return {
           addressKey: target.addressKey,
-          imageUrl,
+          imageUrl: imageUrls[0],
+          imageUrls,
           matchReason: 'address',
         };
       }
@@ -269,12 +314,13 @@ export function matchListingsToComps(
       }
     }
     if (matchedIndex === -1) continue;
-    const imageUrl = extractHeroImageUrl(listings[matchedIndex].images);
-    if (!imageUrl) continue;
+    const imageUrls = extractAllImageUrls(listings[matchedIndex].images);
+    if (imageUrls.length === 0) continue;
     used.add(matchedIndex);
     out.push({
       addressKey: comp.addressKey,
-      imageUrl,
+      imageUrl: imageUrls[0],
+      imageUrls,
       matchReason: 'price+date',
     });
   }
