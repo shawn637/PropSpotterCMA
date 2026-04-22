@@ -1,6 +1,7 @@
 import React from 'react';
 import {
   Document,
+  Image,
   Page,
   StyleSheet,
   Text,
@@ -8,6 +9,19 @@ import {
 } from '@react-pdf/renderer';
 
 import type { FullValuationResult } from '@/lib/types';
+
+/**
+ * Photo data URIs keyed for the report. Subject slot mirrors the
+ * SUBJECT_KEY convention on the client; per-comp slot is keyed by
+ * comparable.addressKey. Values are already base64-encoded data URIs —
+ * the PDF route is responsible for fetching URLs and encoding them
+ * before calling through, so this module stays pure-render and doesn't
+ * reach out to the network.
+ */
+export interface ReportPhotos {
+  subject?: string;
+  comparables?: Record<string, string>;
+}
 
 const COLORS = {
   navy: '#1F3A5F',
@@ -135,6 +149,42 @@ const styles = StyleSheet.create({
     borderTopColor: COLORS.border,
     paddingTop: 4,
   },
+  subjectBlock: { flexDirection: 'row', gap: 10 },
+  subjectPhoto: {
+    width: 120,
+    height: 90,
+    objectFit: 'cover',
+    borderRadius: 2,
+    borderWidth: 0.5,
+    borderColor: COLORS.border,
+  },
+  photoGallery: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginTop: 4,
+  },
+  photoCard: {
+    width: '25%',
+    padding: 3,
+  },
+  photoImage: {
+    width: '100%',
+    height: 70,
+    objectFit: 'cover',
+    borderRadius: 2,
+    borderWidth: 0.5,
+    borderColor: COLORS.border,
+  },
+  photoCaption: {
+    fontSize: 6,
+    color: COLORS.muted,
+    marginTop: 2,
+  },
+  photoCaptionBold: {
+    fontSize: 6,
+    color: COLORS.text,
+    marginTop: 1,
+  },
 });
 
 function currency(n: number): string {
@@ -151,9 +201,18 @@ function shortDate(iso: string): string {
   });
 }
 
-export function ValuationReport({ data }: { data: FullValuationResult }) {
+export function ValuationReport({
+  data,
+  photos,
+}: {
+  data: FullValuationResult;
+  photos?: ReportPhotos;
+}) {
   const { subject, market, cma, vendorAssessment, maxPrice, narrative } = data;
   const comps = cma.comparables.slice(0, 8);
+  const compPhotos = comps
+    .map((c) => ({ comp: c, photo: photos?.comparables?.[c.addressKey] }))
+    .filter((p): p is { comp: typeof comps[number]; photo: string } => !!p.photo);
 
   return (
     <Document title={`PropSpotter CMA — ${subject.fullAddress}`}>
@@ -206,37 +265,45 @@ export function ValuationReport({ data }: { data: FullValuationResult }) {
         <View style={styles.twoCol}>
           <View style={styles.col}>
             <Text style={styles.sectionHeader}>Subject property</Text>
-            <View style={styles.kvRow}>
-              <Text style={styles.k}>Type</Text>
-              <Text style={styles.v}>{subject.propertyType ?? 'House'}</Text>
-            </View>
-            <View style={styles.kvRow}>
-              <Text style={styles.k}>Bedrooms</Text>
-              <Text style={styles.v}>{subject.bedrooms ?? '—'}</Text>
-            </View>
-            <View style={styles.kvRow}>
-              <Text style={styles.k}>Bathrooms</Text>
-              <Text style={styles.v}>{subject.bathrooms ?? '—'}</Text>
-            </View>
-            <View style={styles.kvRow}>
-              <Text style={styles.k}>Car spaces</Text>
-              <Text style={styles.v}>{subject.carSpaces ?? '—'}</Text>
-            </View>
-            <View style={styles.kvRow}>
-              <Text style={styles.k}>Land size</Text>
-              <Text style={styles.v}>
-                {subject.landAreaSqm ? `${subject.landAreaSqm} sqm` : '—'}
-              </Text>
-            </View>
-            <View style={styles.kvRow}>
-              <Text style={styles.k}>Floor area</Text>
-              <Text style={styles.v}>
-                {subject.floorAreaSqm ? `${subject.floorAreaSqm} sqm` : '—'}
-              </Text>
-            </View>
-            <View style={styles.kvRow}>
-              <Text style={styles.k}>Year built</Text>
-              <Text style={styles.v}>{subject.yearBuilt ?? '—'}</Text>
+            <View style={styles.subjectBlock}>
+              {photos?.subject && (
+                // eslint-disable-next-line jsx-a11y/alt-text
+                <Image src={photos.subject} style={styles.subjectPhoto} />
+              )}
+              <View style={{ flex: 1 }}>
+                <View style={styles.kvRow}>
+                  <Text style={styles.k}>Type</Text>
+                  <Text style={styles.v}>{subject.propertyType ?? 'House'}</Text>
+                </View>
+                <View style={styles.kvRow}>
+                  <Text style={styles.k}>Bedrooms</Text>
+                  <Text style={styles.v}>{subject.bedrooms ?? '—'}</Text>
+                </View>
+                <View style={styles.kvRow}>
+                  <Text style={styles.k}>Bathrooms</Text>
+                  <Text style={styles.v}>{subject.bathrooms ?? '—'}</Text>
+                </View>
+                <View style={styles.kvRow}>
+                  <Text style={styles.k}>Car spaces</Text>
+                  <Text style={styles.v}>{subject.carSpaces ?? '—'}</Text>
+                </View>
+                <View style={styles.kvRow}>
+                  <Text style={styles.k}>Land size</Text>
+                  <Text style={styles.v}>
+                    {subject.landAreaSqm ? `${subject.landAreaSqm} sqm` : '—'}
+                  </Text>
+                </View>
+                <View style={styles.kvRow}>
+                  <Text style={styles.k}>Floor area</Text>
+                  <Text style={styles.v}>
+                    {subject.floorAreaSqm ? `${subject.floorAreaSqm} sqm` : '—'}
+                  </Text>
+                </View>
+                <View style={styles.kvRow}>
+                  <Text style={styles.k}>Year built</Text>
+                  <Text style={styles.v}>{subject.yearBuilt ?? '—'}</Text>
+                </View>
+              </View>
             </View>
           </View>
           <View style={styles.col}>
@@ -356,6 +423,26 @@ export function ValuationReport({ data }: { data: FullValuationResult }) {
             );
           })}
         </View>
+
+        {compPhotos.length > 0 && (
+          <>
+            <Text style={styles.sectionHeader}>Comparable photos</Text>
+            <View style={styles.photoGallery}>
+              {compPhotos.map(({ comp, photo }) => (
+                <View key={comp.addressKey} style={styles.photoCard}>
+                  {/* eslint-disable-next-line jsx-a11y/alt-text */}
+                  <Image src={photo} style={styles.photoImage} />
+                  <Text style={styles.photoCaptionBold}>
+                    {comp.fullAddress}
+                  </Text>
+                  <Text style={styles.photoCaption}>
+                    {currency(comp.salePrice)} · {shortDate(comp.saleDateIso)}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          </>
+        )}
 
         <Text style={styles.sectionHeader}>Narrative</Text>
         <Text style={styles.narrative}>{narrative}</Text>

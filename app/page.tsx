@@ -3,7 +3,7 @@
 import { useState } from 'react';
 
 import { AddressForm } from '@/components/AddressForm';
-import { CMAResult } from '@/components/CMAResult';
+import { CMAResult, type PdfPhotoUrls } from '@/components/CMAResult';
 import { LoadingState } from '@/components/LoadingState';
 import type { CMARequest, FullValuationResult } from '@/lib/types';
 
@@ -39,13 +39,16 @@ export default function Home() {
     }
   }
 
-  async function handleDownloadPdf(current: FullValuationResult) {
+  async function handleDownloadPdf(
+    current: FullValuationResult,
+    photoUrls: PdfPhotoUrls,
+  ) {
     setPdfBusy(true);
     try {
       const res = await fetch('/api/pdf', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(current),
+        body: JSON.stringify({ data: current, photoUrls }),
       });
       if (!res.ok) throw new Error(`PDF render failed (${res.status})`);
       const blob = await res.blob();

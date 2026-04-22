@@ -12,9 +12,17 @@ import type {
 
 const SUBJECT_KEY = '__SUBJECT__';
 
+export interface PdfPhotoUrls {
+  subject?: string;
+  comparables?: Record<string, string>;
+}
+
 interface CMAResultProps {
   data: FullValuationResult;
-  onDownloadPdf: (current: FullValuationResult) => void;
+  onDownloadPdf: (
+    current: FullValuationResult,
+    photoUrls: PdfPhotoUrls,
+  ) => void;
   onReset: () => void;
   pdfBusy?: boolean;
 }
@@ -40,6 +48,26 @@ function shortDate(iso: string): string {
  * adjustment / implied-value fields already baked in; we don't want to
  * feed those back in on a recompute.
  */
+/**
+ * Build the photo payload the PDF route expects: subject (if available)
+ * plus per-comp entries for whichever comps survived the user's
+ * exclusion filter. Comps no longer in the CMA are dropped — no sense
+ * paying the server-side fetch cost for photos that won't render.
+ */
+function collectPdfPhotoUrls(
+  imageUrls: Record<string, string>,
+  cma: FullValuationResult['cma'],
+): PdfPhotoUrls {
+  const out: PdfPhotoUrls = { comparables: {} };
+  const subjectUrl = imageUrls[SUBJECT_KEY]?.trim();
+  if (subjectUrl) out.subject = subjectUrl;
+  for (const c of cma.comparables) {
+    const u = imageUrls[c.addressKey]?.trim();
+    if (u) out.comparables![c.addressKey] = u;
+  }
+  return out;
+}
+
 function toPlainComparable(c: Comparable): Comparable {
   return {
     addressKey: c.addressKey,
@@ -810,7 +838,9 @@ export function CMAResult({
 
       <div className="flex flex-wrap gap-3">
         <button
-          onClick={() => onDownloadPdf(current)}
+          onClick={() =>
+            onDownloadPdf(current, collectPdfPhotoUrls(imageUrls, cma))
+          }
           disabled={pdfBusy || !enoughComps}
           className="inline-flex items-center justify-center rounded-md bg-navy px-5 py-2.5 text-white font-medium hover:bg-navy/90 disabled:bg-slate-300"
         >
