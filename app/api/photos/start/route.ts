@@ -25,7 +25,11 @@ const StartRequest = z.object({
   state: z.string().min(2).max(8),
   postcode: z.string().regex(/^\d{4}$/),
   propertyType: z.enum(['house', 'unit', 'townhouse', 'any']).default('house'),
-  maxPagesToScrape: z.number().int().min(1).max(3).default(1),
+  // 2 pages = ~100 listings per channel, the sweet spot for busy
+  // suburbs like Blacktown where a subject sitting on page 2 of the
+  // buy channel would otherwise go unmatched. Cost stays in the
+  // $0.04-$0.20 range per valuation.
+  maxPagesToScrape: z.number().int().min(1).max(5).default(2),
 });
 
 export async function POST(req: Request) {

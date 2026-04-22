@@ -85,17 +85,67 @@ export function reaSlug(raw: string): string {
 }
 
 /**
- * Aggressive address normaliser — strips unit prefixes, case, punctuation,
- * and collapses whitespace. "74 Bentwood Terrace" and "74 BENTWOOD TCE"
- * both end up similar enough to containment-check.
+ * Canonical expansions for the Australian street-type abbreviations we
+ * see across HTAG + REA. HTAG tends to return the full form ("Road",
+ * "Glade"), REA tends to return abbreviated ("Rd", "Gld") — expanding
+ * both to the same token means the containment check in
+ * matchListingsToComps treats them as equal.
+ *
+ * Only unambiguous abbreviations are included. "Cr" is intentionally
+ * skipped (could be Crescent or Court depending on who wrote it), as is
+ * "Str".
+ */
+const STREET_TYPE_EXPANSIONS: Record<string, string> = {
+  st: 'street',
+  rd: 'road',
+  ave: 'avenue',
+  av: 'avenue',
+  cres: 'crescent',
+  dr: 'drive',
+  drv: 'drive',
+  pl: 'place',
+  ct: 'court',
+  cct: 'circuit',
+  pde: 'parade',
+  tce: 'terrace',
+  ter: 'terrace',
+  cl: 'close',
+  ln: 'lane',
+  bvd: 'boulevard',
+  blvd: 'boulevard',
+  gr: 'grove',
+  grv: 'grove',
+  gld: 'glade',
+  hwy: 'highway',
+  gdn: 'garden',
+  gdns: 'gardens',
+  hts: 'heights',
+  pk: 'park',
+  pkwy: 'parkway',
+  prom: 'promenade',
+  sq: 'square',
+  vw: 'view',
+};
+
+/**
+ * Aggressive address normaliser — strips case and punctuation, collapses
+ * whitespace, then expands common Australian street-type abbreviations
+ * so "28 Reservoir Rd" and "28 Reservoir Road" normalise identically.
+ * "74 Bentwood Terrace" and "74 BENTWOOD TCE" both collapse to the same
+ * token sequence.
  */
 export function normaliseAddress(raw: string | undefined): string {
   if (!raw) return '';
-  return raw
+  const cleaned = raw
     .toLowerCase()
     .replace(/[\.,]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+  if (!cleaned) return '';
+  return cleaned
+    .split(' ')
+    .map((token) => STREET_TYPE_EXPANSIONS[token] ?? token)
+    .join(' ');
 }
 
 /**

@@ -282,7 +282,10 @@ export function CMAResult({
           state: subject.state,
           postcode: subject.postcode,
           propertyType: (subject.propertyType ?? 'house').toLowerCase(),
-          maxPagesToScrape: 1,
+          // 2 pages covers busy suburbs like Blacktown where the subject
+          // might be on page 2 of the buy channel. Still ~40-60 s wall
+          // clock on a cold Apify start.
+          maxPagesToScrape: 2,
         }),
       });
       if (!startRes.ok) {

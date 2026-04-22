@@ -150,6 +150,62 @@ test('normaliseAddress: lowercase, strip commas and periods, collapse whitespace
   );
 });
 
+test('normaliseAddress: expands street-type abbreviations to canonical form', () => {
+  // The 28 Reservoir Road / Rd case — HTAG returns "Road", REA often
+  // returns "Rd". Both should normalise identically so the matcher's
+  // containment check finds them equal.
+  assert.equal(
+    normaliseAddress('28 Reservoir Rd, Blacktown NSW 2148'),
+    normaliseAddress('28 Reservoir Road, Blacktown NSW 2148'),
+  );
+  assert.equal(
+    normaliseAddress('74 Bentwood Tce, Stanhope Gardens NSW 2768'),
+    normaliseAddress('74 Bentwood Terrace, Stanhope Gardens NSW 2768'),
+  );
+  assert.equal(
+    normaliseAddress('18 Spicebush Gld'),
+    normaliseAddress('18 Spicebush Glade'),
+  );
+  assert.equal(
+    normaliseAddress('5 Pioneer Ave'),
+    normaliseAddress('5 Pioneer Avenue'),
+  );
+  assert.equal(
+    normaliseAddress('9 Rochdale Cct'),
+    normaliseAddress('9 Rochdale Circuit'),
+  );
+});
+
+test('normaliseAddress: address match via abbreviation expansion drives matchListingsToComps', () => {
+  // HTAG-style "Road" subject paired with an REA-style "Rd" listing.
+  // Without the street-type expansion the containment check would miss.
+  const listing: ReaScraperListing = {
+    address: {
+      streetAddress: '28 Reservoir Rd',
+      suburb: 'Blacktown',
+      state: 'NSW',
+      postcode: '2148',
+    },
+    price: { display: '$950,000' },
+    dateSold: { value: '2026-04-01' },
+    images: [
+      {
+        name: 'main photo',
+        file: 'https://i3.au.reastatic.net/.../reservoir-main.jpg',
+      },
+    ],
+  };
+  const result = matchListingsToComps([], [listing], {
+    addressKey: 'SUBJECT',
+    fullAddress: '28 Reservoir Road, Blacktown NSW 2148',
+  });
+  assert.ok(result.subject);
+  assert.equal(
+    result.subject!.imageUrl,
+    'https://i3.au.reastatic.net/.../reservoir-main.jpg',
+  );
+});
+
 // ---------------------------------------------------------------------------
 // matchListingsToComps — the fixture-backed integration test.
 // These 3 listings are taken verbatim from Shawn's live REA scraper
