@@ -271,7 +271,9 @@ export function CMAResult({
         throw new Error('No active comparables to fetch photos for.');
       }
 
-      // 1. Start the run.
+      // 1. Start both runs (sold channel for comps + buy channel for
+      //    the subject) in parallel. Server responds as soon as both
+      //    runs are queued on Apify.
       const startRes = await fetch('/api/photos/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -287,13 +289,18 @@ export function CMAResult({
         const err = await startRes.json().catch(() => ({}));
         throw new Error(err?.error ?? `Start failed (${startRes.status})`);
       }
-      const { runId, datasetId } = (await startRes.json()) as {
-        runId: string;
-        datasetId: string;
+      const startBody = (await startRes.json()) as {
+        sold: { runId: string; datasetId: string } | null;
+        buy: { runId: string; datasetId: string } | null;
       };
+      if (!startBody.sold && !startBody.buy) {
+        throw new Error('Both Apify runs failed to start.');
+      }
 
-      // 2. Poll until finished. Apify cold start is ~20-30 s, full scrape
-      //    typically 30-60 s. Cap at 3 min wall clock, ~60 polls at 3 s.
+      // 2. Poll until BOTH finished (or either one finishes and the
+      //    other was unavailable). Apify cold start is ~20-30 s, full
+      //    scrape typically 30-60 s. Cap at 3 min wall clock, ~60
+      //    polls at 3 s.
       setAutoFetching('polling');
       const maxAttempts = 60;
       const pollIntervalMs = 3000;
@@ -311,8 +318,8 @@ export function CMAResult({
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            runId,
-            datasetId,
+            sold: startBody.sold,
+            buy: startBody.buy,
             comps: activeComps,
             subject: {
               addressKey: subject.addressKey,

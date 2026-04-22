@@ -5,6 +5,7 @@ import {
   ApifyError,
   getDatasetItems,
   getRunStatus,
+  type ApifyRunSnapshot,
 } from '@/lib/apify/client';
 import {
   matchListingsToComps,
@@ -17,26 +18,40 @@ export const runtime = 'nodejs';
 export const maxDuration = 30;
 
 /**
- * Poll a previously-started Apify run. The client supplies:
- *   runId      — from /api/photos/start
- *   datasetId  — from /api/photos/start
- *   comps      — the current list of comparables the UI is showing,
- *                so the server can match REA listings against them
- *                and return a compact {addressKey, imageUrl} map.
+ * Poll the sold + buy Apify runs started by /api/photos/start. Returns
+ * `finished: false` until BOTH runs terminate. Once both are done
+ * (regardless of individual success/failure), fetches whichever
+ * datasets succeeded and runs the matcher:
  *
- * Response shape is a discriminated union:
- *   { status: 'RUNNING' | 'READY' | '...' }
- *   { status: 'SUCCEEDED', matched: [{addressKey, imageUrl, matchReason}],
- *     totalListings: number, unmatchedAddressKeys: string[] }
- *   { status: 'FAILED' | 'TIMED-OUT' | 'ABORTED', error: string }
+ *   comps    ← sold dataset (or buy dataset as last-resort fallback)
+ *   subject  ← buy dataset (or sold dataset as fallback)
  *
- * The client polls this endpoint every 3–5 s until `finished` is true.
- * All matching runs server-side so the response stays small (tens of
- * bytes per comp instead of tens of KB of raw REA listing data).
+ * Response shape (when finished):
+ *   {
+ *     status: 'DONE',
+ *     finished: true,
+ *     matched: [{addressKey, imageUrl, matchReason}],
+ *     subjectMatch: {addressKey, imageUrl, matchReason} | null,
+ *     unmatchedAddressKeys: [...],
+ *     totalListings: { sold: number, buy: number },
+ *     errors: { sold?: string, buy?: string }
+ *   }
  */
 const PollRequest = z.object({
-  runId: z.string().min(1).max(64),
-  datasetId: z.string().min(1).max(64),
+  sold: z
+    .object({
+      runId: z.string().min(1).max(64),
+      datasetId: z.string().min(1).max(64),
+    })
+    .nullable()
+    .optional(),
+  buy: z
+    .object({
+      runId: z.string().min(1).max(64),
+      datasetId: z.string().min(1).max(64),
+    })
+    .nullable()
+    .optional(),
   comps: z
     .array(
       z.object({
@@ -83,37 +98,45 @@ export async function POST(req: Request) {
     );
   }
 
-  const { runId, datasetId, comps, subject } = parsed.data;
+  const { sold, buy, comps, subject } = parsed.data;
+  if (!sold && !buy) {
+    return NextResponse.json(
+      { error: 'At least one of sold or buy run info is required.' },
+      { status: 400 },
+    );
+  }
 
   try {
-    const snap = await getRunStatus(runId);
-    if (!snap.finished) {
+    const soldSnap = sold ? await getRunStatus(sold.runId) : null;
+    const buySnap = buy ? await getRunStatus(buy.runId) : null;
+
+    const soldFinished = !soldSnap || soldSnap.finished;
+    const buyFinished = !buySnap || buySnap.finished;
+
+    if (!(soldFinished && buyFinished)) {
       return NextResponse.json({
-        status: snap.status,
+        status: 'RUNNING',
         finished: false,
-        runId,
-        datasetId,
+        sold: soldSnap && { status: soldSnap.status, finished: soldSnap.finished },
+        buy: buySnap && { status: buySnap.status, finished: buySnap.finished },
       });
     }
-    if (!snap.succeeded) {
-      return NextResponse.json(
-        {
-          status: snap.status,
-          finished: true,
-          error: `Apify run ${runId} terminated with status ${snap.status}`,
-        },
-        { status: 502 },
-      );
-    }
 
-    const items = await getDatasetItems<ReaScraperListing>(snap.datasetId);
-    const soldOnly = items.filter(
-      (i) => i && (i.isSoldChannel === true || i.isSoldChannel === undefined),
+    // Both runs terminated. Fetch datasets for whichever succeeded.
+    const [soldItems, buyItems] = await Promise.all([
+      fetchDatasetSafely(soldSnap),
+      fetchDatasetSafely(buySnap),
+    ]);
+
+    const soldListings = ((soldItems.items ?? []) as ReaScraperListing[])
+      .filter(
+        (i) =>
+          !!i && (i.isSoldChannel === true || i.isSoldChannel === undefined),
+      );
+    const buyListings = ((buyItems.items ?? []) as ReaScraperListing[]).filter(
+      (i) => !!i,
     );
 
-    // matchListingsToComps expects the full Comparable shape; we only
-    // received the essential fields over the wire (to keep the POST
-    // body small). Reconstitute with defaults so the matcher is happy.
     const compsForMatch: Comparable[] = comps.map((c) => ({
       addressKey: c.addressKey,
       fullAddress: c.fullAddress,
@@ -121,37 +144,71 @@ export async function POST(req: Request) {
       saleDateIso: c.saleDateIso,
     }));
 
-    const matchResult = matchListingsToComps(
-      compsForMatch,
-      soldOnly,
-      subject,
+    // Comps match from sold dataset. If sold failed entirely, fall back
+    // to buy (unlikely to contain the sold comps but cheap to try).
+    const compsSource = soldListings.length > 0 ? soldListings : buyListings;
+    const compsMatchResult = matchListingsToComps(compsForMatch, compsSource);
+
+    // Subject matches from buy dataset first (typical pre-purchase case:
+    // subject is currently listed). Fall back to sold if not found —
+    // covers the case where the subject itself recently sold.
+    let subjectMatch: ReturnType<
+      typeof matchListingsToComps
+    >['subject'];
+    if (subject) {
+      const buyTry = matchListingsToComps([], buyListings, subject);
+      if (buyTry.subject) {
+        subjectMatch = buyTry.subject;
+      } else {
+        const soldTry = matchListingsToComps([], soldListings, subject);
+        if (soldTry.subject) {
+          subjectMatch = soldTry.subject;
+        }
+      }
+    }
+
+    const matchedKeys = new Set(
+      compsMatchResult.comps.map((m) => m.addressKey),
     );
-    const matchedKeys = new Set(matchResult.comps.map((m) => m.addressKey));
     const unmatchedAddressKeys = comps
       .map((c) => c.addressKey)
       .filter((k) => !matchedKeys.has(k));
 
+    const errors: { sold?: string; buy?: string } = {};
+    if (soldSnap && !soldSnap.succeeded) {
+      errors.sold = `sold run ended ${soldSnap.status}`;
+    }
+    if (buySnap && !buySnap.succeeded) {
+      errors.buy = `buy run ended ${buySnap.status}`;
+    }
+    if (soldItems.error) errors.sold = soldItems.error;
+    if (buyItems.error) errors.buy = buyItems.error;
+
     console.log(
       JSON.stringify({
         tag: 'apify-poll',
-        runId,
-        datasetId,
-        totalListings: items.length,
-        matchedCount: matchResult.comps.length,
+        soldRunId: sold?.runId,
+        buyRunId: buy?.runId,
+        soldCount: soldListings.length,
+        buyCount: buyListings.length,
+        matchedCount: compsMatchResult.comps.length,
         unmatchedCount: unmatchedAddressKeys.length,
-        subjectMatched: !!matchResult.subject,
+        subjectMatched: !!subjectMatch,
+        errors,
       }),
     );
 
     return NextResponse.json({
-      status: snap.status,
+      status: 'DONE',
       finished: true,
-      runId,
-      datasetId,
-      totalListings: items.length,
-      matched: matchResult.comps,
-      subjectMatch: matchResult.subject ?? null,
+      matched: compsMatchResult.comps,
+      subjectMatch: subjectMatch ?? null,
       unmatchedAddressKeys,
+      totalListings: {
+        sold: soldListings.length,
+        buy: buyListings.length,
+      },
+      errors,
     });
   } catch (err) {
     if (err instanceof ApifyError) {
@@ -166,5 +223,26 @@ export async function POST(req: Request) {
     }
     const message = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: message }, { status: 500 });
+  }
+}
+
+async function fetchDatasetSafely(
+  snap: ApifyRunSnapshot | null,
+): Promise<{ items: unknown[] | null; error?: string }> {
+  if (!snap) return { items: null };
+  if (!snap.succeeded) {
+    return {
+      items: null,
+      error: `run ended with status ${snap.status}`,
+    };
+  }
+  try {
+    const items = await getDatasetItems<unknown>(snap.datasetId);
+    return { items };
+  } catch (err) {
+    return {
+      items: null,
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
 }

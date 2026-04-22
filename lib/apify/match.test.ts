@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import type { Comparable } from '@/lib/types';
 
 import {
+  buildReaBuyUrl,
+  buildReaSearchUrl,
   buildReaSoldUrl,
   extractHeroImageUrl,
   matchListingsToComps,
@@ -53,6 +55,30 @@ test('buildReaSoldUrl: any-property-type channel drops the prefix', () => {
     url,
     'https://www.realestate.com.au/sold/in-orange%2c+nsw+2800/list-1',
   );
+});
+
+test('buildReaBuyUrl: buy channel uses the /buy/ path prefix', () => {
+  const url = buildReaBuyUrl({
+    suburb: 'Stanhope Gardens',
+    state: 'NSW',
+    postcode: '2768',
+  });
+  assert.equal(
+    url,
+    'https://www.realestate.com.au/buy/property-house-in-stanhope+gardens%2c+nsw+2768/list-1',
+  );
+});
+
+test('buildReaSearchUrl: channel is the only difference between sold and buy', () => {
+  const common = {
+    suburb: 'Baulkham Hills',
+    state: 'NSW',
+    postcode: '2153',
+    propertyType: 'house' as const,
+  };
+  const sold = buildReaSearchUrl({ channel: 'sold', ...common });
+  const buy = buildReaSearchUrl({ channel: 'buy', ...common });
+  assert.equal(sold.replace('/sold/', '/XXX/'), buy.replace('/buy/', '/XXX/'));
 });
 
 test('reaSlug strips punctuation and lowercases', () => {

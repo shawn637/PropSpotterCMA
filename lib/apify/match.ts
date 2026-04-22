@@ -29,16 +29,19 @@ export interface ReaScraperListing {
 }
 
 /**
- * Build the realestate.com.au sold-search URL for a given suburb. This
- * is the `startUrl` we feed to the Apify actor.
+ * Build a realestate.com.au search URL for the Apify actor's startUrl
+ * input. Channel selects between sold listings (`/sold/...`) and active
+ * for-sale listings (`/buy/...`). Same URL shape in both cases; only the
+ * path prefix changes.
  *
- * Pattern: https://www.realestate.com.au/sold/property-house-in-<suburb>%2c+<state>+<postcode>/list-1
+ * Pattern: https://www.realestate.com.au/<channel>/property-<type>-in-<suburb>%2c+<state>+<postcode>/list-1
  *
- * We default to the `property-house-in-` slot because our mock/subject
- * default is 'House'. For unit or townhouse subjects the caller can
- * pass propertyType.
+ * The default is sold+house — matches the comparables pass. For the
+ * subject property we fire a second run on the buy channel since a
+ * subject being pre-purchased is usually a currently-listed sale.
  */
-export function buildReaSoldUrl(args: {
+export function buildReaSearchUrl(args: {
+  channel: 'sold' | 'buy';
   suburb: string;
   state: string;
   postcode: string;
@@ -48,8 +51,29 @@ export function buildReaSoldUrl(args: {
   const prefix = type === 'any' ? 'in' : `property-${type}-in`;
   const slugSuburb = reaSlug(args.suburb);
   const slugState = reaSlug(args.state);
-  // REA uses "%2c+" as the literal separator between suburb and state.
-  return `https://www.realestate.com.au/sold/${prefix}-${slugSuburb}%2c+${slugState}+${args.postcode}/list-1`;
+  return `https://www.realestate.com.au/${args.channel}/${prefix}-${slugSuburb}%2c+${slugState}+${args.postcode}/list-1`;
+}
+
+/**
+ * Backward-compat wrapper. New code should call buildReaSearchUrl
+ * directly with an explicit channel.
+ */
+export function buildReaSoldUrl(args: {
+  suburb: string;
+  state: string;
+  postcode: string;
+  propertyType?: 'house' | 'unit' | 'townhouse' | 'any';
+}): string {
+  return buildReaSearchUrl({ channel: 'sold', ...args });
+}
+
+export function buildReaBuyUrl(args: {
+  suburb: string;
+  state: string;
+  postcode: string;
+  propertyType?: 'house' | 'unit' | 'townhouse' | 'any';
+}): string {
+  return buildReaSearchUrl({ channel: 'buy', ...args });
 }
 
 export function reaSlug(raw: string): string {
