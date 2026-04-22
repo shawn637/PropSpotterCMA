@@ -6,7 +6,9 @@ import { clientKey, rateLimit } from '@/lib/ratelimit';
 import type { VisionAttributes } from '@/lib/types';
 
 export const runtime = 'nodejs';
-export const maxDuration = 60;
+// Multi-image Vision calls on large comp sets can push well past the
+// default 60 s. Pro tier caps maxDuration at 300 s; that's our ceiling.
+export const maxDuration = 300;
 
 /**
  * Batch-analyze listing photos. ONE Claude Vision call per target

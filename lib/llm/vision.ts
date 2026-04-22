@@ -182,12 +182,22 @@ export interface AnalyzeListingResult {
   imagesSent?: number;
 }
 
-/** Max images to send per listing. Cap protects token spend; 10 is
- *  enough to see hero + kitchen + bathroom + at least one other interior
- *  + backyard + street on a typical REA listing. */
-const MAX_VISION_IMAGES_PER_CALL = 10;
+/** Max images to send per listing. Cap protects token spend AND
+ *  per-call latency; 6 is enough to see hero + kitchen + bathroom +
+ *  living + backyard + one extra on a typical REA listing. Pushing
+ *  higher (we tried 10) makes individual Claude calls slow enough that
+ *  13 parallel listings can't complete inside Vercel's 300 s function
+ *  budget when Anthropic's concurrency caps in. */
+const MAX_VISION_IMAGES_PER_CALL = 6;
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024; // 8 MB — Anthropic's per-image limit
 const FETCH_TIMEOUT_MS = 10_000;
+/** Per-call hard deadline for the Anthropic messages request. Any
+ *  single listing that doesn't come back inside this window is
+ *  abandoned so it can't drag the whole batch past Vercel's function
+ *  budget. 75 s is comfortably longer than a healthy Sonnet 4.6 vision
+ *  response on 6 images (~15-25 s typical), short enough that four
+ *  bad apples don't exhaust a 300 s budget. */
+const ANTHROPIC_CALL_TIMEOUT_MS = 75_000;
 
 /**
  * Run Claude Vision on the full set of photos for ONE listing — subject
@@ -255,25 +265,28 @@ export async function analyzeListing(
         data: u.base64,
       },
     }));
-    const response = await client.messages.create({
-      model: model(),
-      max_tokens: 1200,
-      system: VISION_SYSTEM_PROMPT,
-      tools: [VISION_TOOL],
-      tool_choice: { type: 'tool', name: VISION_TOOL.name },
-      messages: [
-        {
-          role: 'user',
-          content: [
-            ...imageBlocks,
-            {
-              type: 'text',
-              text: `Classify this property using all ${usable.length} listing photo(s) above. Synthesise across every image — do not over-weight any single shot. Respond with one tool call.`,
-            },
-          ],
-        },
-      ],
-    });
+    const response = await client.messages.create(
+      {
+        model: model(),
+        max_tokens: 1200,
+        system: VISION_SYSTEM_PROMPT,
+        tools: [VISION_TOOL],
+        tool_choice: { type: 'tool', name: VISION_TOOL.name },
+        messages: [
+          {
+            role: 'user',
+            content: [
+              ...imageBlocks,
+              {
+                type: 'text',
+                text: `Classify this property using all ${usable.length} listing photo(s) above. Synthesise across every image — do not over-weight any single shot. Respond with one tool call.`,
+              },
+            ],
+          },
+        ],
+      },
+      { timeout: ANTHROPIC_CALL_TIMEOUT_MS },
+    );
 
     const tokenUsage = {
       input: response.usage.input_tokens,
