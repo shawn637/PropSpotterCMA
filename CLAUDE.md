@@ -122,6 +122,12 @@ Optional:
 - `CLAUDE_MODEL` — defaults to `claude-sonnet-4-6`.
 - `MOCK_DATA` — defaults to `true`. Set to `false` to use live HTAG.
 - `HTAG_API_KEY`, `HTAG_API_BASE_URL` — only read when `MOCK_DATA=false`.
+- `APIFY_API_TOKEN`, `APIFY_ACTOR_ID` — power the "Auto-fetch photos"
+  button. The actor is a realestate.com.au sold-listing scraper;
+  `lib/apify/match.ts` matches scraped rows to HTAG comps by address
+  (with a price+date fallback), and the main photo URL is then fed
+  into the Claude Vision pass. Leave `APIFY_API_TOKEN` unset to
+  disable auto-fetch — manual URL paste still works.
 
 ## LLM guidance
 

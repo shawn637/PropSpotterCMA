@@ -82,6 +82,13 @@ export function CMAResult({
   const [analyzing, setAnalyzing] = useState(false);
   const [visionError, setVisionError] = useState<string | null>(null);
 
+  // Auto-fetch (Apify scraper) state.
+  const [autoFetching, setAutoFetching] = useState<
+    null | 'starting' | 'polling' | 'done'
+  >(null);
+  const [autoFetchError, setAutoFetchError] = useState<string | null>(null);
+  const [autoFetchUnmatched, setAutoFetchUnmatched] = useState<string[]>([]);
+
   // Recompute CMA + three-numbers on the fly whenever the excluded set,
   // the vision attributes, or the source data change. No server
   // round-trip needed — both modules are pure and run fine in the
@@ -235,6 +242,172 @@ export function CMAResult({
   function clearVision() {
     setVisionMap({});
     setVisionError(null);
+  }
+
+  /**
+   * One-click "Auto-fetch photos": kicks off an Apify scrape of
+   * realestate.com.au sold listings for the subject's suburb, polls
+   * until complete, merges the matched image URLs into `imageUrls`
+   * state, then auto-triggers the Claude Vision pass so the facade
+   * attributes flow straight into the similarity adjustment without
+   * an extra click.
+   */
+  async function runAutoFetch() {
+    setAutoFetching('starting');
+    setAutoFetchError(null);
+    setAutoFetchUnmatched([]);
+
+    try {
+      const activeComps = originalComps
+        .filter((c) => !excluded.has(c.addressKey))
+        .map((c) => ({
+          addressKey: c.addressKey,
+          fullAddress: c.fullAddress,
+          salePrice: c.salePrice,
+          saleDateIso: c.saleDateIso,
+        }));
+
+      if (activeComps.length === 0) {
+        throw new Error('No active comparables to fetch photos for.');
+      }
+
+      // 1. Start the run.
+      const startRes = await fetch('/api/photos/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          suburb: subject.suburb,
+          state: subject.state,
+          postcode: subject.postcode,
+          propertyType: (subject.propertyType ?? 'house').toLowerCase(),
+          maxPagesToScrape: 1,
+        }),
+      });
+      if (!startRes.ok) {
+        const err = await startRes.json().catch(() => ({}));
+        throw new Error(err?.error ?? `Start failed (${startRes.status})`);
+      }
+      const { runId, datasetId } = (await startRes.json()) as {
+        runId: string;
+        datasetId: string;
+      };
+
+      // 2. Poll until finished. Apify cold start is ~20-30 s, full scrape
+      //    typically 30-60 s. Cap at 3 min wall clock, ~60 polls at 3 s.
+      setAutoFetching('polling');
+      const maxAttempts = 60;
+      const pollIntervalMs = 3000;
+      let matched: Array<{
+        addressKey: string;
+        imageUrl: string;
+        matchReason: 'address' | 'price+date';
+      }> = [];
+      let unmatched: string[] = [];
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        await new Promise((r) => setTimeout(r, pollIntervalMs));
+        const pollRes = await fetch('/api/photos/poll', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ runId, datasetId, comps: activeComps }),
+        });
+        if (!pollRes.ok) {
+          const err = await pollRes.json().catch(() => ({}));
+          throw new Error(err?.error ?? `Poll failed (${pollRes.status})`);
+        }
+        const body = (await pollRes.json()) as {
+          status: string;
+          finished: boolean;
+          matched?: typeof matched;
+          unmatchedAddressKeys?: string[];
+        };
+        if (body.finished) {
+          matched = body.matched ?? [];
+          unmatched = body.unmatchedAddressKeys ?? [];
+          break;
+        }
+      }
+
+      if (matched.length === 0 && unmatched.length === 0) {
+        throw new Error(
+          'Scrape timed out after 3 minutes without finishing. Try again or paste URLs manually.',
+        );
+      }
+
+      // 3. Merge matched image URLs into imageUrls state.
+      if (matched.length > 0) {
+        setImageUrls((prev) => {
+          const next = { ...prev };
+          for (const m of matched) {
+            next[m.addressKey] = m.imageUrl;
+          }
+          return next;
+        });
+      }
+      setAutoFetchUnmatched(unmatched);
+      setAutoFetching('done');
+
+      // 4. Chain straight into Claude Vision. This reads the fresh
+      //    imageUrls via runVisionAnalysis — but React state update
+      //    is async, so rather than relying on it we inline the calls.
+      if (matched.length > 0) {
+        await analyzeImagesDirect(matched);
+      }
+    } catch (err) {
+      setAutoFetchError(err instanceof Error ? err.message : String(err));
+      setAutoFetching(null);
+    }
+  }
+
+  /**
+   * Chain: after auto-fetch succeeds, run the vision analysis on the
+   * fresh URLs without waiting for a state-update round trip.
+   */
+  async function analyzeImagesDirect(
+    matched: Array<{ addressKey: string; imageUrl: string }>,
+  ) {
+    setAnalyzing(true);
+    setVisionError(null);
+    try {
+      const body: Record<string, unknown> = {
+        comps: matched.map((m) => ({
+          addressKey: m.addressKey,
+          imageUrl: m.imageUrl,
+        })),
+      };
+      const res = await fetch('/api/vision', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.error ?? `Vision failed (${res.status})`);
+      }
+      const result = (await res.json()) as {
+        comps: Array<{
+          addressKey: string;
+          attrs: VisionAttributes | null;
+          error?: string;
+        }>;
+      };
+      setVisionMap((prev) => {
+        const next = { ...prev };
+        for (const r of result.comps) {
+          if (r.attrs) next[r.addressKey] = r.attrs;
+        }
+        return next;
+      });
+      const failed = result.comps.filter((c) => c.attrs == null);
+      if (failed.length > 0) {
+        setVisionError(
+          `${failed.length} image(s) couldn't be classified by Claude Vision.`,
+        );
+      }
+    } catch (err) {
+      setVisionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAnalyzing(false);
+    }
   }
 
   return (
@@ -466,12 +639,39 @@ export function CMAResult({
           )}
         </div>
         <p className="text-xs text-slate-500 mb-3">
-          Paste a listing photo URL for the subject and any comps. Click
-          &ldquo;Analyze visuals&rdquo; and Claude Sonnet 4.6 will classify
-          storeys, construction material, and condition for each. Results
-          feed into the similarity adjustment — brick vs fibro, single vs
-          double, renovated vs poor. Approx 1¢ per image.
+          Click <strong>Auto-fetch photos</strong> to scrape realestate.com.au
+          sold listings for this suburb and auto-populate the URL fields
+          below — typically 30–60 seconds end-to-end. Or paste URLs
+          manually. Either way, &ldquo;Analyze visuals&rdquo; runs Claude
+          Sonnet 4.6 on each image to classify storeys, construction
+          material, and condition, which then feeds the similarity
+          adjustment.
         </p>
+
+        <div className="mb-3 flex items-center gap-3">
+          <button
+            onClick={runAutoFetch}
+            disabled={!!autoFetching || analyzing}
+            className="rounded-md bg-navy px-4 py-2 text-white text-sm font-medium hover:bg-navy/90 disabled:bg-slate-300"
+          >
+            {autoFetching === 'starting' && 'Starting scrape…'}
+            {autoFetching === 'polling' && 'Waiting for scrape…'}
+            {autoFetching === 'done' && !analyzing && 'Photos fetched ✓'}
+            {autoFetching === null && 'Auto-fetch photos'}
+          </button>
+          {autoFetchUnmatched.length > 0 && (
+            <span className="text-xs text-amber-700">
+              {autoFetchUnmatched.length} comp(s) had no match — paste
+              URLs manually below.
+            </span>
+          )}
+        </div>
+
+        {autoFetchError && (
+          <div className="mb-3 rounded-md bg-red-50 border border-red-200 text-red-800 px-3 py-2 text-xs">
+            {autoFetchError}
+          </div>
+        )}
 
         <div className="space-y-2">
           <div className="flex items-center gap-2 text-sm">
