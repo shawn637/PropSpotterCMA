@@ -10,6 +10,7 @@ export interface PropertyDetails {
   postcode: string;
   locPid: string;
   landAreaSqm?: number;
+  floorAreaSqm?: number;
   bedrooms?: number;
   bathrooms?: number;
   carSpaces?: number;
@@ -23,6 +24,7 @@ export interface Comparable {
   salePrice: number;
   saleDateIso: string;
   landAreaSqm?: number;
+  floorAreaSqm?: number;
   bedrooms?: number;
   bathrooms?: number;
   carSpaces?: number;

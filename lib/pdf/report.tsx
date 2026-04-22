@@ -103,12 +103,13 @@ const styles = StyleSheet.create({
   },
   th: { fontSize: 7, fontWeight: 700, color: COLORS.navy },
   td: { fontSize: 7 },
-  cAddr: { flex: 3 },
+  cAddr: { flex: 2.6 },
+  cSize: { flex: 1.1, textAlign: 'right' },
   cPrice: { flex: 1.2, textAlign: 'right' },
   cDate: { flex: 1, textAlign: 'right' },
   cAdj: { flex: 0.9, textAlign: 'right' },
   cImpl: { flex: 1.3, textAlign: 'right' },
-  cFlags: { flex: 1.4 },
+  cFlags: { flex: 1.3 },
   narrative: {
     marginTop: 6,
     fontSize: 9,
@@ -227,6 +228,12 @@ export function ValuationReport({ data }: { data: FullValuationResult }) {
               </Text>
             </View>
             <View style={styles.kvRow}>
+              <Text style={styles.k}>Floor area</Text>
+              <Text style={styles.v}>
+                {subject.floorAreaSqm ? `${subject.floorAreaSqm} sqm` : '—'}
+              </Text>
+            </View>
+            <View style={styles.kvRow}>
               <Text style={styles.k}>Year built</Text>
               <Text style={styles.v}>{subject.yearBuilt ?? '—'}</Text>
             </View>
@@ -302,6 +309,7 @@ export function ValuationReport({ data }: { data: FullValuationResult }) {
         <View style={styles.table}>
           <View style={styles.tableHead}>
             <Text style={[styles.th, styles.cAddr]}>Address</Text>
+            <Text style={[styles.th, styles.cSize]}>Land/Floor</Text>
             <Text style={[styles.th, styles.cPrice]}>Sale price</Text>
             <Text style={[styles.th, styles.cDate]}>Date</Text>
             <Text style={[styles.th, styles.cAdj]}>Adj.</Text>
@@ -311,6 +319,9 @@ export function ValuationReport({ data }: { data: FullValuationResult }) {
           {comps.map((c) => (
             <View key={c.addressKey} style={styles.tableRow}>
               <Text style={[styles.td, styles.cAddr]}>{c.fullAddress}</Text>
+              <Text style={[styles.td, styles.cSize]}>
+                {`${c.landAreaSqm ?? '—'}/${c.floorAreaSqm ?? '—'}`}
+              </Text>
               <Text style={[styles.td, styles.cPrice]}>
                 {currency(c.salePrice)}
               </Text>

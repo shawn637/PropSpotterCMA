@@ -215,6 +215,7 @@ export function parseSoldSearch(
         salePrice,
         saleDateIso: saleDate,
         landAreaSqm: pickNumber(row, 'land_area'),
+        floorAreaSqm: pickNumber(row, 'floor_area'),
         bedrooms: pickInteger(row, 'bedrooms'),
         bathrooms: pickInteger(row, 'bathrooms'),
         carSpaces: pickInteger(row, 'car_spaces'),

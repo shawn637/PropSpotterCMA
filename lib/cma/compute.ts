@@ -10,6 +10,13 @@ const INDEXING_CAP_MONTHS = 12;
 const MAX_COMPARABLE_AGE_MONTHS = 6;
 const MIN_COMPARABLES = 3;
 
+// Hard drop thresholds — a comparable outside these size bands vs the
+// subject is so structurally different (usually a single-storey vs
+// double-storey build, or a townhouse sitting in a house dataset) that
+// including it distorts the median. 50% tolerance in either direction.
+const SIZE_MISMATCH_UPPER = 1.5;
+const SIZE_MISMATCH_LOWER = 1 / SIZE_MISMATCH_UPPER;
+
 export function monthsBetween(fromIso: string, toIso: string): number {
   const from = new Date(fromIso).getTime();
   const to = new Date(toIso).getTime();
@@ -45,6 +52,17 @@ export function deriveHeuristicAdjustment(
     factor *= 1 + clamp(landDelta, -0.1, 0.1);
   }
 
+  // Floor area is the strongest proxy for storey count and overall
+  // liveable size. A double-storey house on a 450sqm block typically
+  // has 1.5-2x the floor area of a single-storey house on the same
+  // block, so this adjustment is where "storey mismatch" effectively
+  // gets priced in.
+  if (subject.floorAreaSqm && comp.floorAreaSqm) {
+    const ratio = subject.floorAreaSqm / comp.floorAreaSqm;
+    const floorDelta = (ratio - 1) * 0.4;
+    factor *= 1 + clamp(floorDelta, -0.15, 0.15);
+  }
+
   if (subject.bedrooms != null && comp.bedrooms != null) {
     factor *= 1 + clamp((subject.bedrooms - comp.bedrooms) * 0.03, -0.09, 0.09);
   }
@@ -62,7 +80,29 @@ export function deriveHeuristicAdjustment(
     factor *= 1 + clamp(ageDelta, -0.05, 0.05);
   }
 
-  return clamp(factor, 0.8, 1.2);
+  return clamp(factor, 0.75, 1.25);
+}
+
+/**
+ * Returns true if the comparable's land OR floor area is >50% different
+ * from the subject — an obvious structural mismatch (double-storey vs
+ * single-storey, or a tiny townhouse lumped in with standalone houses).
+ * If either dimension is missing on either side we do NOT drop — the
+ * heuristic adjustment handles the partial-info case.
+ */
+export function isSizeMismatched(
+  subject: PropertyDetails,
+  comp: Comparable,
+): boolean {
+  if (subject.landAreaSqm && comp.landAreaSqm) {
+    const ratio = comp.landAreaSqm / subject.landAreaSqm;
+    if (ratio > SIZE_MISMATCH_UPPER || ratio < SIZE_MISMATCH_LOWER) return true;
+  }
+  if (subject.floorAreaSqm && comp.floorAreaSqm) {
+    const ratio = comp.floorAreaSqm / subject.floorAreaSqm;
+    if (ratio > SIZE_MISMATCH_UPPER || ratio < SIZE_MISMATCH_LOWER) return true;
+  }
+  return false;
 }
 
 export function deriveFlags(
@@ -82,6 +122,13 @@ export function deriveFlags(
     flags.push('land size variance');
   }
   if (
+    subject.floorAreaSqm &&
+    comp.floorAreaSqm &&
+    Math.abs(comp.floorAreaSqm / subject.floorAreaSqm - 1) > 0.3
+  ) {
+    flags.push('floor area variance');
+  }
+  if (
     subject.bedrooms != null &&
     comp.bedrooms != null &&
     Math.abs(comp.bedrooms - subject.bedrooms) >= 2
@@ -95,19 +142,26 @@ export function filterComparables(
   comparables: Comparable[],
   subject: PropertyDetails,
   nowIso: string,
-): Comparable[] {
-  return comparables.filter((c) => {
+): { kept: Comparable[]; droppedMismatched: Comparable[] } {
+  const kept: Comparable[] = [];
+  const droppedMismatched: Comparable[] = [];
+  for (const c of comparables) {
     const months = monthsBetween(c.saleDateIso, nowIso);
-    if (months > MAX_COMPARABLE_AGE_MONTHS) return false;
+    if (months > MAX_COMPARABLE_AGE_MONTHS) continue;
     if (
       c.propertyType &&
       subject.propertyType &&
       c.propertyType !== subject.propertyType
     ) {
-      return false;
+      continue;
     }
-    return true;
-  });
+    if (isSizeMismatched(subject, c)) {
+      droppedMismatched.push(c);
+      continue;
+    }
+    kept.push(c);
+  }
+  return { kept, droppedMismatched };
 }
 
 export function computeCMA(
@@ -116,12 +170,22 @@ export function computeCMA(
   market: MarketContext,
   nowIso: string = new Date().toISOString(),
 ): CMAResult {
-  const filtered = filterComparables(comparables, subject, nowIso);
+  const { kept, droppedMismatched } = filterComparables(
+    comparables,
+    subject,
+    nowIso,
+  );
   const notes: string[] = [];
 
-  if (filtered.length < MIN_COMPARABLES) {
+  if (droppedMismatched.length > 0) {
     notes.push(
-      `Only ${filtered.length} comparable(s) within ${MAX_COMPARABLE_AGE_MONTHS} months; minimum ${MIN_COMPARABLES} required.`,
+      `Excluded ${droppedMismatched.length} comparable(s) with land or floor area more than 50% different from the subject (likely single-vs-double-storey mismatch).`,
+    );
+  }
+
+  if (kept.length < MIN_COMPARABLES) {
+    notes.push(
+      `Only ${kept.length} comparable(s) within ${MAX_COMPARABLE_AGE_MONTHS} months after size filtering; minimum ${MIN_COMPARABLES} required.`,
     );
     return {
       fairValue: 0,
@@ -133,7 +197,7 @@ export function computeCMA(
     };
   }
 
-  const derived: ComparableWithDerived[] = filtered.map((c) => {
+  const derived: ComparableWithDerived[] = kept.map((c) => {
     const monthsSinceSale = monthsBetween(c.saleDateIso, nowIso);
     const indexedSalePrice = indexSalePrice(
       c.salePrice,

@@ -48,7 +48,8 @@ export function CMAResult({
         <p className="text-sm text-slate-500">
           {subject.propertyType ?? 'House'} · {subject.bedrooms ?? '—'}BR ·{' '}
           {subject.bathrooms ?? '—'}BA ·{' '}
-          {subject.landAreaSqm ? `${subject.landAreaSqm} sqm` : '—'}
+          {subject.landAreaSqm ? `${subject.landAreaSqm} sqm land` : '— land'} ·{' '}
+          {subject.floorAreaSqm ? `${subject.floorAreaSqm} sqm floor` : '— floor'}
         </p>
       </div>
 
@@ -90,6 +91,13 @@ export function CMAResult({
             <dt className="text-slate-500">Comparables used</dt>
             <dd className="text-right">{cma.comparables.length}</dd>
           </dl>
+          {cma.notes.length > 0 && (
+            <ul className="mt-3 space-y-1 text-xs text-slate-600 list-disc list-inside">
+              {cma.notes.map((n, i) => (
+                <li key={i}>{n}</li>
+              ))}
+            </ul>
+          )}
         </section>
 
         <section className="rounded-lg bg-white border border-slate-200 p-4">
@@ -149,6 +157,9 @@ export function CMAResult({
             <thead>
               <tr className="text-left text-slate-500">
                 <th className="py-1 pr-2">Address</th>
+                <th className="py-1 pr-2 text-right">BR/BA</th>
+                <th className="py-1 pr-2 text-right">Land</th>
+                <th className="py-1 pr-2 text-right">Floor</th>
                 <th className="py-1 pr-2 text-right">Sale price</th>
                 <th className="py-1 pr-2 text-right">Date</th>
                 <th className="py-1 pr-2 text-right">Adj.</th>
@@ -163,6 +174,15 @@ export function CMAResult({
                   className="border-t border-slate-100 align-top"
                 >
                   <td className="py-1 pr-2">{c.fullAddress}</td>
+                  <td className="py-1 pr-2 text-right">
+                    {c.bedrooms ?? '—'}/{c.bathrooms ?? '—'}
+                  </td>
+                  <td className="py-1 pr-2 text-right">
+                    {c.landAreaSqm ? `${c.landAreaSqm}` : '—'}
+                  </td>
+                  <td className="py-1 pr-2 text-right">
+                    {c.floorAreaSqm ? `${c.floorAreaSqm}` : '—'}
+                  </td>
                   <td className="py-1 pr-2 text-right">
                     {currency(c.salePrice)}
                   </td>

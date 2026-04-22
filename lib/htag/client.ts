@@ -191,6 +191,7 @@ export async function getSubjectProperty(
     bathrooms: summary.bathrooms,
     carSpaces: summary.carSpaces,
     landAreaSqm: summary.landAreaSqm,
+    floorAreaSqm: summary.floorAreaSqm,
     yearBuilt: summary.yearBuilt,
     propertyType: summary.propertyType,
   };
