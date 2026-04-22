@@ -2,6 +2,36 @@ export type CycleStage = 'Recovery' | 'Rising' | 'Peaking' | 'Correction';
 
 export type VendorMotivation = 'Standard' | 'Motivated' | 'Distressed';
 
+/**
+ * Structured attributes extracted from a listing photo by Claude Vision.
+ * All fields optional-with-'unknown' because the model should not have
+ * to guess when the façade isn't visible or the angle is ambiguous.
+ */
+export type StoreyCount = 'single' | 'double' | 'multi' | 'unknown';
+export type ConstructionMaterial =
+  | 'brick'
+  | 'weatherboard'
+  | 'fibro'
+  | 'render'
+  | 'mixed'
+  | 'unknown';
+export type ConditionGrade =
+  | 'poor'
+  | 'average'
+  | 'renovated'
+  | 'new'
+  | 'unknown';
+export type RoofType = 'tile' | 'metal' | 'unknown';
+
+export interface VisionAttributes {
+  storeys: StoreyCount;
+  constructionMaterial: ConstructionMaterial;
+  conditionGrade: ConditionGrade;
+  roofType: RoofType;
+  notes: string;
+  imageUrl: string;
+}
+
 export interface PropertyDetails {
   addressKey: string;
   fullAddress: string;
@@ -16,6 +46,7 @@ export interface PropertyDetails {
   carSpaces?: number;
   yearBuilt?: number;
   propertyType?: 'House' | 'Unit' | 'Townhouse' | 'Other';
+  visionAttrs?: VisionAttributes;
 }
 
 export interface Comparable {
@@ -32,6 +63,7 @@ export interface Comparable {
   distanceKm?: number;
   htagAdjustmentFactor?: number;
   propertyType?: 'House' | 'Unit' | 'Townhouse' | 'Other';
+  visionAttrs?: VisionAttributes;
 }
 
 export interface ComparableWithDerived extends Comparable {

@@ -2,8 +2,12 @@ import type {
   Comparable,
   ComparableWithDerived,
   CMAResult,
+  ConditionGrade,
+  ConstructionMaterial,
   MarketContext,
   PropertyDetails,
+  StoreyCount,
+  VisionAttributes,
 } from '@/lib/types';
 
 const INDEXING_CAP_MONTHS = 12;
@@ -80,7 +84,104 @@ export function deriveHeuristicAdjustment(
     factor *= 1 + clamp(ageDelta, -0.05, 0.05);
   }
 
-  return clamp(factor, 0.75, 1.25);
+  // Visual / façade adjustment — only when both sides have vision attrs.
+  // Captures storey mismatch, construction material, and condition
+  // differences that HTAG's structural fields never expose.
+  factor *= deriveVisualAdjustment(subject.visionAttrs, comp.visionAttrs);
+
+  return clamp(factor, 0.7, 1.3);
+}
+
+/**
+ * Pure visual adjustment derived from a pair of Claude-Vision-extracted
+ * VisionAttributes. Returns a multiplier in [0.85, 1.15]:
+ *   factor > 1  → comparable is structurally WORSE than subject (its
+ *                 sale price understates the subject's value; uplift)
+ *   factor < 1  → comparable is structurally BETTER than subject
+ *                 (its sale price overstates the subject's value; discount)
+ *
+ * Returns 1.0 if either side is missing, so unseen properties are not
+ * penalised.
+ */
+export function deriveVisualAdjustment(
+  subjectAttrs: VisionAttributes | undefined,
+  compAttrs: VisionAttributes | undefined,
+): number {
+  if (!subjectAttrs || !compAttrs) return 1;
+  let factor = 1;
+
+  // Storeys: single vs double has a meaningful price delta. Use the
+  // comp-to-subject difference in storey count.
+  const storeyDelta =
+    storeyOrdinal(subjectAttrs.storeys) - storeyOrdinal(compAttrs.storeys);
+  if (storeyDelta !== 0) {
+    factor *= 1 + clamp(storeyDelta * 0.07, -0.08, 0.08);
+  }
+
+  // Construction material: brick is the Australian benchmark for new
+  // builds; fibro and weatherboard typically trade at a discount for
+  // post-1980s stock. Subject better than comp → uplift.
+  const matDelta =
+    materialScore(subjectAttrs.constructionMaterial) -
+    materialScore(compAttrs.constructionMaterial);
+  if (matDelta !== 0) {
+    factor *= 1 + clamp(matDelta * 0.025, -0.05, 0.05);
+  }
+
+  // Condition grade: biggest single visual driver of delta. Ranges
+  // from poor (-2) to new (+2).
+  const condDelta =
+    conditionScore(subjectAttrs.conditionGrade) -
+    conditionScore(compAttrs.conditionGrade);
+  if (condDelta !== 0) {
+    factor *= 1 + clamp(condDelta * 0.03, -0.08, 0.08);
+  }
+
+  return clamp(factor, 0.85, 1.15);
+}
+
+function storeyOrdinal(s: StoreyCount): number {
+  switch (s) {
+    case 'single':
+      return 1;
+    case 'double':
+      return 2;
+    case 'multi':
+      return 3;
+    default:
+      return 0; // unknown — neutral
+  }
+}
+
+function materialScore(m: ConstructionMaterial): number {
+  switch (m) {
+    case 'brick':
+    case 'render':
+      return 1;
+    case 'mixed':
+      return 0;
+    case 'weatherboard':
+      return -0.5;
+    case 'fibro':
+      return -1;
+    default:
+      return 0; // unknown — neutral
+  }
+}
+
+function conditionScore(c: ConditionGrade): number {
+  switch (c) {
+    case 'new':
+      return 2;
+    case 'renovated':
+      return 1;
+    case 'average':
+      return 0;
+    case 'poor':
+      return -2;
+    default:
+      return 0; // unknown — neutral
+  }
 }
 
 /**

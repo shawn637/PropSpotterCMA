@@ -47,12 +47,25 @@ asking Shawn — the reports should look "Excel-clean."
 All in `lib/cma/compute.ts`.
 
 - Filter comparables to same suburb, ≤ 6 months old, same property type.
+- **Size-mismatch filter** drops comps whose land OR floor area is >50%
+  different from the subject (single-vs-double-storey outliers).
 - Index each sale forward by `salePrice × (1 + growth × min(months, 12)/12)`
   — the 12-month cap prevents over-indexing stale sales.
-- Apply HTAG's `htagAdjustmentFactor` if supplied, else a heuristic based on
-  land size / bed / bath / carspaces / year built (clamped to 0.8–1.2).
+- Apply HTAG's `htagAdjustmentFactor` if supplied, else a heuristic based
+  on land size / floor area / bed / bath / carspaces / year built /
+  (optional) Claude Vision attributes. Clamped to [0.7, 1.3].
+- **Claude Vision leg** (optional): when the user pastes a façade photo
+  URL for the subject and comps in the UI, `lib/llm/vision.ts` extracts
+  storey count / construction material / condition / roof type per image.
+  `deriveVisualAdjustment` in compute.ts factors those into the
+  similarity multiplier (storey mismatch ±8%, material ±5%, condition
+  ±8%). See also `app/api/vision/route.ts`.
 - Fair value = median of implied values. Low = 25th pctile, High = 75th.
 - Need ≥ 3 comparables after filtering; the route returns 422 if not.
+- The UI lets the user **exclude** individual comps and the CMA +
+  three-numbers recompute live in the browser by calling `computeCMA` /
+  `computeMaxPrice` directly — both modules are pure so there's no
+  server round-trip for refinement.
 
 ## Data flow
 
@@ -114,11 +127,19 @@ Optional:
 
 - Default model is `claude-sonnet-4-6`. The SDK method is
   `client.messages.create()` (no `.beta.`).
-- Vendor classification uses `output_config.format` with a JSON schema —
-  don't fall back to string parsing unless the structured call fails.
-- Both LLM calls have hard-coded fallbacks (heuristic keyword matcher for
-  vendor, deterministic prose for narrative). The app must produce a valid
-  report even without an Anthropic key.
+- Three call sites:
+  - `lib/llm/vendor-motivation.ts` → classifies listing copy into
+    Standard/Motivated/Distressed via forced tool use.
+  - `lib/llm/vendor-motivation.ts` → writes the narrative paragraph for
+    the PDF.
+  - `lib/llm/vision.ts` → Claude Vision on façade photos; extracts
+    storeys / construction material / condition / roof type via forced
+    tool use (tool name `classify_property_facade`). Images are fetched
+    server-side and base64-encoded before send because SDK 0.30 doesn't
+    yet type URL image sources.
+- Both classification calls have hard-coded fallbacks (heuristic keyword
+  matcher for vendor; `attrs: null` for vision). The app must produce a
+  valid report even without an Anthropic key.
 - System prompts start with a BRAND_RULES block forbidding the prohibited
   terminology. Keep that prefix stable — it is where prompt caching will
   take effect once the prompt grows past ~2k tokens.

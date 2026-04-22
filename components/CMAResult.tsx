@@ -4,7 +4,13 @@ import { useMemo, useState } from 'react';
 
 import { computeCMA } from '@/lib/cma/compute';
 import { computeMaxPrice } from '@/lib/cma/maxprice';
-import type { Comparable, FullValuationResult } from '@/lib/types';
+import type {
+  Comparable,
+  FullValuationResult,
+  VisionAttributes,
+} from '@/lib/types';
+
+const SUBJECT_KEY = '__SUBJECT__';
 
 interface CMAResultProps {
   data: FullValuationResult;
@@ -65,14 +71,33 @@ export function CMAResult({
   // manually excluded from the running CMA.
   const [excluded, setExcluded] = useState<Set<string>>(new Set());
 
-  // Recompute CMA + three-numbers on the fly whenever the excluded set
-  // changes. No server round-trip needed — both modules are pure and
-  // run fine in the browser.
+  // Per-comp (+ subject) image URLs the user has pasted. Used by the
+  // "Refine visuals" button to POST /api/vision; survive across
+  // recomputes so the user doesn't have to re-enter.
+  const [imageUrls, setImageUrls] = useState<Record<string, string>>({});
+  // Vision results keyed by addressKey (SUBJECT_KEY for the subject).
+  const [visionMap, setVisionMap] = useState<Record<string, VisionAttributes>>(
+    {},
+  );
+  const [analyzing, setAnalyzing] = useState(false);
+  const [visionError, setVisionError] = useState<string | null>(null);
+
+  // Recompute CMA + three-numbers on the fly whenever the excluded set,
+  // the vision attributes, or the source data change. No server
+  // round-trip needed — both modules are pure and run fine in the
+  // browser.
   const { current, enoughComps } = useMemo(() => {
+    const subjectWithVision = {
+      ...subject,
+      visionAttrs: visionMap[SUBJECT_KEY] ?? subject.visionAttrs,
+    };
     const keptRaw = originalComps
       .filter((c) => !excluded.has(c.addressKey))
-      .map(toPlainComparable);
-    const recomputedCma = computeCMA(subject, keptRaw, market);
+      .map((c) => ({
+        ...toPlainComparable(c),
+        visionAttrs: visionMap[c.addressKey] ?? c.visionAttrs,
+      }));
+    const recomputedCma = computeCMA(subjectWithVision, keptRaw, market);
     const enough = recomputedCma.comparables.length >= 3;
     const recomputedMax = enough
       ? computeMaxPrice({
@@ -86,6 +111,7 @@ export function CMAResult({
 
     const currentResult: FullValuationResult = {
       ...data,
+      subject: subjectWithVision,
       cma: recomputedCma,
       maxPrice: recomputedMax,
     };
@@ -93,6 +119,7 @@ export function CMAResult({
   }, [
     originalComps,
     excluded,
+    visionMap,
     subject,
     market,
     vendorAssessment.motivation,
@@ -124,6 +151,91 @@ export function CMAResult({
   }
 
   const hasUserExclusions = excluded.size > 0;
+
+  function setImageUrl(key: string, url: string) {
+    setImageUrls((prev) => ({ ...prev, [key]: url }));
+  }
+
+  async function runVisionAnalysis() {
+    setAnalyzing(true);
+    setVisionError(null);
+    try {
+      const subjectUrl = imageUrls[SUBJECT_KEY]?.trim();
+      const compEntries = originalComps
+        .filter((c) => !excluded.has(c.addressKey))
+        .map((c) => ({
+          addressKey: c.addressKey,
+          imageUrl: (imageUrls[c.addressKey] ?? '').trim(),
+        }))
+        .filter((e) => e.imageUrl.length > 0);
+
+      if (!subjectUrl && compEntries.length === 0) {
+        setVisionError('Paste at least one image URL first.');
+        setAnalyzing(false);
+        return;
+      }
+
+      const body: Record<string, unknown> = { comps: compEntries };
+      if (subjectUrl) {
+        body.subject = {
+          addressKey: subject.addressKey,
+          imageUrl: subjectUrl,
+        };
+      }
+
+      const res = await fetch('/api/vision', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(
+          errBody?.error ?? `Vision request failed (${res.status})`,
+        );
+      }
+      const result = (await res.json()) as {
+        subject?: { attrs: VisionAttributes | null; error?: string };
+        comps: Array<{
+          addressKey: string;
+          attrs: VisionAttributes | null;
+          error?: string;
+        }>;
+      };
+
+      setVisionMap((prev) => {
+        const next = { ...prev };
+        if (result.subject?.attrs) next[SUBJECT_KEY] = result.subject.attrs;
+        for (const r of result.comps) {
+          if (r.attrs) next[r.addressKey] = r.attrs;
+        }
+        return next;
+      });
+
+      // Collect per-image failures into a single banner so the user
+      // can see which URLs couldn't be classified (bad URL, auth
+      // wall, private CDN etc).
+      const failed: string[] = [];
+      if (result.subject?.error) failed.push(`subject: ${result.subject.error}`);
+      for (const r of result.comps) {
+        if (r.error) failed.push(`${r.addressKey.slice(0, 18)}…: ${r.error}`);
+      }
+      if (failed.length > 0) {
+        setVisionError(
+          `${failed.length} image(s) couldn't be classified:\n${failed.join('\n')}`,
+        );
+      }
+    } catch (err) {
+      setVisionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAnalyzing(false);
+    }
+  }
+
+  function clearVision() {
+    setVisionMap({});
+    setVisionError(null);
+  }
 
   return (
     <div className="space-y-6">
@@ -274,6 +386,7 @@ export function CMAResult({
                 <th className="py-1 pr-2 text-right">BR/BA</th>
                 <th className="py-1 pr-2 text-right">Land</th>
                 <th className="py-1 pr-2 text-right">Floor</th>
+                <th className="py-1 pr-2">Vision</th>
                 <th className="py-1 pr-2 text-right">Sale price</th>
                 <th className="py-1 pr-2 text-right">Date</th>
                 <th className="py-1 pr-2 text-right">Adj.</th>
@@ -282,51 +395,141 @@ export function CMAResult({
               </tr>
             </thead>
             <tbody>
-              {displayRows.map(({ comp: c, active }) => (
-                <tr
-                  key={c.addressKey}
-                  className={`border-t border-slate-100 align-top ${
-                    active ? '' : 'opacity-40 line-through'
-                  }`}
-                >
-                  <td className="py-1 pr-2">
-                    <input
-                      type="checkbox"
-                      checked={active}
-                      onChange={() => toggle(c.addressKey)}
-                      aria-label={`Include ${c.fullAddress}`}
-                    />
-                  </td>
-                  <td className="py-1 pr-2">{c.fullAddress}</td>
-                  <td className="py-1 pr-2 text-right">
-                    {c.bedrooms ?? '—'}/{c.bathrooms ?? '—'}
-                  </td>
-                  <td className="py-1 pr-2 text-right">
-                    {c.landAreaSqm ? `${c.landAreaSqm}` : '—'}
-                  </td>
-                  <td className="py-1 pr-2 text-right">
-                    {c.floorAreaSqm ? `${c.floorAreaSqm}` : '—'}
-                  </td>
-                  <td className="py-1 pr-2 text-right">
-                    {currency(c.salePrice)}
-                  </td>
-                  <td className="py-1 pr-2 text-right">
-                    {shortDate(c.saleDateIso)}
-                  </td>
-                  <td className="py-1 pr-2 text-right">
-                    {c.adjustmentFactor.toFixed(3)}
-                  </td>
-                  <td className="py-1 pr-2 text-right">
-                    {currency(c.impliedSubjectValue)}
-                  </td>
-                  <td className="py-1 text-slate-500">
-                    {c.flags.join(', ') || '—'}
-                  </td>
-                </tr>
-              ))}
+              {displayRows.map(({ comp: c, active }) => {
+                const derivedComp = cma.comparables.find(
+                  (dc) => dc.addressKey === c.addressKey,
+                );
+                const attrs = visionMap[c.addressKey];
+                return (
+                  <tr
+                    key={c.addressKey}
+                    className={`border-t border-slate-100 align-top ${
+                      active ? '' : 'opacity-40 line-through'
+                    }`}
+                  >
+                    <td className="py-1 pr-2">
+                      <input
+                        type="checkbox"
+                        checked={active}
+                        onChange={() => toggle(c.addressKey)}
+                        aria-label={`Include ${c.fullAddress}`}
+                      />
+                    </td>
+                    <td className="py-1 pr-2">{c.fullAddress}</td>
+                    <td className="py-1 pr-2 text-right">
+                      {c.bedrooms ?? '—'}/{c.bathrooms ?? '—'}
+                    </td>
+                    <td className="py-1 pr-2 text-right">
+                      {c.landAreaSqm ? `${c.landAreaSqm}` : '—'}
+                    </td>
+                    <td className="py-1 pr-2 text-right">
+                      {c.floorAreaSqm ? `${c.floorAreaSqm}` : '—'}
+                    </td>
+                    <td className="py-1 pr-2 text-xs text-slate-600">
+                      <VisionBadges attrs={attrs} />
+                    </td>
+                    <td className="py-1 pr-2 text-right">
+                      {currency(c.salePrice)}
+                    </td>
+                    <td className="py-1 pr-2 text-right">
+                      {shortDate(c.saleDateIso)}
+                    </td>
+                    <td className="py-1 pr-2 text-right">
+                      {(derivedComp ?? c).adjustmentFactor.toFixed(3)}
+                    </td>
+                    <td className="py-1 pr-2 text-right">
+                      {currency((derivedComp ?? c).impliedSubjectValue)}
+                    </td>
+                    <td className="py-1 text-slate-500">
+                      {(derivedComp ?? c).flags.join(', ') || '—'}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
+      </section>
+
+      <section className="rounded-lg bg-white border border-slate-200 p-4">
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="text-sm font-semibold text-navy">
+            Refine with façade photos (Claude Vision)
+          </h3>
+          {Object.keys(visionMap).length > 0 && (
+            <button
+              onClick={clearVision}
+              className="text-xs rounded-md border border-slate-300 px-2 py-1 hover:bg-slate-50"
+            >
+              Clear vision data
+            </button>
+          )}
+        </div>
+        <p className="text-xs text-slate-500 mb-3">
+          Paste a listing photo URL for the subject and any comps. Click
+          &ldquo;Analyze visuals&rdquo; and Claude Sonnet 4.6 will classify
+          storeys, construction material, and condition for each. Results
+          feed into the similarity adjustment — brick vs fibro, single vs
+          double, renovated vs poor. Approx 1¢ per image.
+        </p>
+
+        <div className="space-y-2">
+          <div className="flex items-center gap-2 text-sm">
+            <span className="w-40 text-xs text-slate-500 truncate">
+              Subject
+            </span>
+            <input
+              type="url"
+              value={imageUrls[SUBJECT_KEY] ?? ''}
+              onChange={(e) => setImageUrl(SUBJECT_KEY, e.target.value)}
+              placeholder="https://… photo URL"
+              className="flex-1 rounded-md border border-slate-300 px-2 py-1 text-xs focus:border-navy focus:outline-none focus:ring-1 focus:ring-navy"
+            />
+            <VisionBadges attrs={visionMap[SUBJECT_KEY]} />
+          </div>
+          {originalComps
+            .filter((c) => !excluded.has(c.addressKey))
+            .map((c) => (
+              <div key={c.addressKey} className="flex items-center gap-2 text-sm">
+                <span
+                  className="w-40 text-xs text-slate-500 truncate"
+                  title={c.fullAddress}
+                >
+                  {c.fullAddress}
+                </span>
+                <input
+                  type="url"
+                  value={imageUrls[c.addressKey] ?? ''}
+                  onChange={(e) => setImageUrl(c.addressKey, e.target.value)}
+                  placeholder="https://… photo URL"
+                  className="flex-1 rounded-md border border-slate-300 px-2 py-1 text-xs focus:border-navy focus:outline-none focus:ring-1 focus:ring-navy"
+                />
+                <VisionBadges attrs={visionMap[c.addressKey]} />
+              </div>
+            ))}
+        </div>
+
+        <div className="mt-3 flex items-center gap-3">
+          <button
+            onClick={runVisionAnalysis}
+            disabled={analyzing}
+            className="rounded-md bg-teal px-4 py-2 text-white text-sm font-medium hover:bg-teal/90 disabled:bg-slate-300"
+          >
+            {analyzing ? 'Analyzing…' : 'Analyze visuals'}
+          </button>
+          {Object.keys(visionMap).length > 0 && (
+            <span className="text-xs text-slate-500">
+              {Object.keys(visionMap).length} image(s) classified; numbers
+              above updated.
+            </span>
+          )}
+        </div>
+
+        {visionError && (
+          <div className="mt-3 rounded-md bg-amber-50 border border-amber-200 text-amber-900 px-3 py-2 text-xs whitespace-pre-line">
+            {visionError}
+          </div>
+        )}
       </section>
 
       <section className="rounded-lg bg-white border border-slate-200 p-4">
@@ -380,5 +583,28 @@ function NumberCard({
       <p className="text-2xl font-bold text-navy mt-1">{value}</p>
       <p className="text-xs text-slate-500 mt-2">{note}</p>
     </div>
+  );
+}
+
+function VisionBadges({ attrs }: { attrs?: VisionAttributes }) {
+  if (!attrs) return <span className="text-slate-400">—</span>;
+  const parts: string[] = [];
+  if (attrs.storeys !== 'unknown') parts.push(attrs.storeys);
+  if (attrs.constructionMaterial !== 'unknown')
+    parts.push(attrs.constructionMaterial);
+  if (attrs.conditionGrade !== 'unknown') parts.push(attrs.conditionGrade);
+  if (parts.length === 0) return <span className="text-slate-400">unknown</span>;
+  return (
+    <span className="text-teal">
+      {parts.join(' · ')}
+      {attrs.notes ? (
+        <span
+          className="ml-1 text-slate-400"
+          title={attrs.notes}
+        >
+          ⓘ
+        </span>
+      ) : null}
+    </span>
   );
 }

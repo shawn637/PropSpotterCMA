@@ -1,11 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import type { Comparable, PropertyDetails, MarketContext } from '@/lib/types';
+import type {
+  Comparable,
+  PropertyDetails,
+  MarketContext,
+  VisionAttributes,
+} from '@/lib/types';
 
 import {
   computeCMA,
   deriveHeuristicAdjustment,
+  deriveVisualAdjustment,
   filterComparables,
   isSizeMismatched,
 } from './compute';
@@ -199,6 +205,116 @@ test('computeCMA: mismatched comps excluded, notes record the exclusion', () => 
     cma.fairValue < 1_700_000,
     `fairValue ${cma.fairValue} should not be inflated by the excluded double-storey`,
   );
+});
+
+// ---------------------------------------------------------------------------
+// deriveVisualAdjustment — Claude Vision leg
+// ---------------------------------------------------------------------------
+
+function visionAttrs(overrides: Partial<VisionAttributes> = {}): VisionAttributes {
+  return {
+    storeys: 'single',
+    constructionMaterial: 'brick',
+    conditionGrade: 'average',
+    roofType: 'tile',
+    notes: '',
+    imageUrl: 'https://example.com/img.jpg',
+    ...overrides,
+  };
+}
+
+test('deriveVisualAdjustment: missing vision attrs on either side → factor 1', () => {
+  assert.equal(deriveVisualAdjustment(undefined, visionAttrs()), 1);
+  assert.equal(deriveVisualAdjustment(visionAttrs(), undefined), 1);
+  assert.equal(deriveVisualAdjustment(undefined, undefined), 1);
+});
+
+test('deriveVisualAdjustment: identical attrs → factor 1', () => {
+  const f = deriveVisualAdjustment(visionAttrs(), visionAttrs());
+  assert.equal(f, 1);
+});
+
+test('deriveVisualAdjustment: single-storey subject vs double-storey comp → factor < 1', () => {
+  // Comp is structurally better (bigger) → its sale price overstates
+  // the subject's value, so the adjustment brings it DOWN.
+  const subject = visionAttrs({ storeys: 'single' });
+  const comp = visionAttrs({ storeys: 'double' });
+  const f = deriveVisualAdjustment(subject, comp);
+  assert.ok(f < 1, `expected factor < 1, got ${f}`);
+  // Within the ±8% storey cap.
+  assert.ok(f >= 0.92);
+});
+
+test('deriveVisualAdjustment: renovated subject vs poor comp → factor > 1', () => {
+  const subject = visionAttrs({ conditionGrade: 'renovated' });
+  const comp = visionAttrs({ conditionGrade: 'poor' });
+  const f = deriveVisualAdjustment(subject, comp);
+  assert.ok(f > 1, `expected factor > 1, got ${f}`);
+});
+
+test('deriveVisualAdjustment: brick subject vs fibro comp → factor > 1', () => {
+  const subject = visionAttrs({ constructionMaterial: 'brick' });
+  const comp = visionAttrs({ constructionMaterial: 'fibro' });
+  const f = deriveVisualAdjustment(subject, comp);
+  assert.ok(f > 1, `expected factor > 1, got ${f}`);
+});
+
+test('deriveVisualAdjustment: combined storey + material + condition stays clamped to [0.85, 1.15]', () => {
+  // Worst-case comp: bigger, nicer, better material.
+  const subject = visionAttrs({
+    storeys: 'single',
+    constructionMaterial: 'fibro',
+    conditionGrade: 'poor',
+  });
+  const comp = visionAttrs({
+    storeys: 'double',
+    constructionMaterial: 'brick',
+    conditionGrade: 'new',
+  });
+  const f = deriveVisualAdjustment(subject, comp);
+  assert.ok(f >= 0.85 && f <= 1.15, `factor ${f} must be clamped to [0.85, 1.15]`);
+  assert.ok(f < 1, 'better comp discounts implied value');
+});
+
+test('deriveVisualAdjustment: unknown storey / material / condition → neutral', () => {
+  const f = deriveVisualAdjustment(
+    visionAttrs({
+      storeys: 'unknown',
+      constructionMaterial: 'unknown',
+      conditionGrade: 'unknown',
+    }),
+    visionAttrs({
+      storeys: 'unknown',
+      constructionMaterial: 'unknown',
+      conditionGrade: 'unknown',
+    }),
+  );
+  assert.equal(f, 1);
+});
+
+test('deriveHeuristicAdjustment: visual leg multiplies through and respects final clamp', () => {
+  const subjectWithVision: PropertyDetails = {
+    ...subject,
+    visionAttrs: visionAttrs({
+      storeys: 'single',
+      constructionMaterial: 'brick',
+      conditionGrade: 'renovated',
+    }),
+  };
+  const compMatch = makeComp({
+    floorAreaSqm: 180,
+    visionAttrs: visionAttrs({
+      storeys: 'double',
+      constructionMaterial: 'fibro',
+      conditionGrade: 'poor',
+    }),
+  });
+  const f = deriveHeuristicAdjustment(subjectWithVision, compMatch);
+  // Subject meaningfully better than comp on 3 visual axes, so factor
+  // should be > 1 (uplift implied from the cheaper comp's sale price).
+  assert.ok(f > 1, `expected uplift, got ${f}`);
+  // And still within the widened [0.7, 1.3] total clamp.
+  assert.ok(f <= 1.3);
 });
 
 test('computeCMA: returns zeros + notes when fewer than 3 comps survive filter', () => {

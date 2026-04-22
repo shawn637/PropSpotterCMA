@@ -103,13 +103,14 @@ const styles = StyleSheet.create({
   },
   th: { fontSize: 7, fontWeight: 700, color: COLORS.navy },
   td: { fontSize: 7 },
-  cAddr: { flex: 2.6 },
-  cSize: { flex: 1.1, textAlign: 'right' },
+  cAddr: { flex: 2.4 },
+  cSize: { flex: 1, textAlign: 'right' },
+  cVision: { flex: 1.4 },
   cPrice: { flex: 1.2, textAlign: 'right' },
-  cDate: { flex: 1, textAlign: 'right' },
-  cAdj: { flex: 0.9, textAlign: 'right' },
-  cImpl: { flex: 1.3, textAlign: 'right' },
-  cFlags: { flex: 1.3 },
+  cDate: { flex: 0.9, textAlign: 'right' },
+  cAdj: { flex: 0.8, textAlign: 'right' },
+  cImpl: { flex: 1.2, textAlign: 'right' },
+  cFlags: { flex: 1.1 },
   narrative: {
     marginTop: 6,
     fontSize: 9,
@@ -310,33 +311,50 @@ export function ValuationReport({ data }: { data: FullValuationResult }) {
           <View style={styles.tableHead}>
             <Text style={[styles.th, styles.cAddr]}>Address</Text>
             <Text style={[styles.th, styles.cSize]}>Land/Floor</Text>
+            <Text style={[styles.th, styles.cVision]}>Vision</Text>
             <Text style={[styles.th, styles.cPrice]}>Sale price</Text>
             <Text style={[styles.th, styles.cDate]}>Date</Text>
             <Text style={[styles.th, styles.cAdj]}>Adj.</Text>
             <Text style={[styles.th, styles.cImpl]}>Implied value</Text>
             <Text style={[styles.th, styles.cFlags]}>Flags</Text>
           </View>
-          {comps.map((c) => (
-            <View key={c.addressKey} style={styles.tableRow}>
-              <Text style={[styles.td, styles.cAddr]}>{c.fullAddress}</Text>
-              <Text style={[styles.td, styles.cSize]}>
-                {`${c.landAreaSqm ?? '—'}/${c.floorAreaSqm ?? '—'}`}
-              </Text>
-              <Text style={[styles.td, styles.cPrice]}>
-                {currency(c.salePrice)}
-              </Text>
-              <Text style={[styles.td, styles.cDate]}>{shortDate(c.saleDateIso)}</Text>
-              <Text style={[styles.td, styles.cAdj]}>
-                {c.adjustmentFactor.toFixed(3)}
-              </Text>
-              <Text style={[styles.td, styles.cImpl]}>
-                {currency(c.impliedSubjectValue)}
-              </Text>
-              <Text style={[styles.td, styles.cFlags]}>
-                {c.flags.join(', ') || '—'}
-              </Text>
-            </View>
-          ))}
+          {comps.map((c) => {
+            const vision = c.visionAttrs
+              ? [
+                  c.visionAttrs.storeys !== 'unknown' && c.visionAttrs.storeys,
+                  c.visionAttrs.constructionMaterial !== 'unknown' &&
+                    c.visionAttrs.constructionMaterial,
+                  c.visionAttrs.conditionGrade !== 'unknown' &&
+                    c.visionAttrs.conditionGrade,
+                ]
+                  .filter(Boolean)
+                  .join(' · ')
+              : '';
+            return (
+              <View key={c.addressKey} style={styles.tableRow}>
+                <Text style={[styles.td, styles.cAddr]}>{c.fullAddress}</Text>
+                <Text style={[styles.td, styles.cSize]}>
+                  {`${c.landAreaSqm ?? '—'}/${c.floorAreaSqm ?? '—'}`}
+                </Text>
+                <Text style={[styles.td, styles.cVision]}>{vision || '—'}</Text>
+                <Text style={[styles.td, styles.cPrice]}>
+                  {currency(c.salePrice)}
+                </Text>
+                <Text style={[styles.td, styles.cDate]}>
+                  {shortDate(c.saleDateIso)}
+                </Text>
+                <Text style={[styles.td, styles.cAdj]}>
+                  {c.adjustmentFactor.toFixed(3)}
+                </Text>
+                <Text style={[styles.td, styles.cImpl]}>
+                  {currency(c.impliedSubjectValue)}
+                </Text>
+                <Text style={[styles.td, styles.cFlags]}>
+                  {c.flags.join(', ') || '—'}
+                </Text>
+              </View>
+            );
+          })}
         </View>
 
         <Text style={styles.sectionHeader}>Narrative</Text>
