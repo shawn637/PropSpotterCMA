@@ -108,26 +108,35 @@ export interface MatchResult {
   matchReason: 'address' | 'price+date';
 }
 
+export interface SubjectLike {
+  addressKey: string;
+  fullAddress: string;
+}
+
 /**
  * Given the set of HTAG comparables we already have in the CMA and the
  * raw REA listings the scraper returned, produce a {addressKey → imageUrl}
  * map. Records without a hero image are skipped. Records that don't
  * match any comp are ignored (we only care about photos for the comps
  * we're actually using).
+ *
+ * If `subject` is supplied, attempt to match it too — subject matching
+ * is address-only (the subject is the property being valued, not a sale,
+ * so we don't have a salePrice/saleDateIso to fall back on).
  */
 export function matchListingsToComps(
   comps: Comparable[],
   listings: ReaScraperListing[],
-): MatchResult[] {
+  subject?: SubjectLike,
+): { comps: MatchResult[]; subject?: MatchResult } {
   const out: MatchResult[] = [];
   const used = new Set<number>(); // index into listings[]
 
-  for (const comp of comps) {
-    const compNorm = normaliseAddress(comp.fullAddress);
-    const compPostcode = extractPostcode(comp.fullAddress);
-
-    // 1. Address + postcode match.
-    let matchedIndex = -1;
+  const tryAddressMatch = (
+    target: { addressKey: string; fullAddress: string },
+  ): MatchResult | undefined => {
+    const targetNorm = normaliseAddress(target.fullAddress);
+    const targetPostcode = extractPostcode(target.fullAddress);
     for (let i = 0; i < listings.length; i++) {
       if (used.has(i)) continue;
       const l = listings[i];
@@ -135,48 +144,68 @@ export function matchListingsToComps(
       const streetNorm = normaliseAddress(l.address.streetAddress);
       if (!streetNorm) continue;
       const postcodesMatch =
-        !compPostcode ||
+        !targetPostcode ||
         !l.address.postcode ||
-        l.address.postcode === compPostcode;
+        l.address.postcode === targetPostcode;
       if (!postcodesMatch) continue;
-      if (compNorm.includes(streetNorm) || streetNorm.includes(compNorm)) {
+      if (targetNorm.includes(streetNorm) || streetNorm.includes(targetNorm)) {
+        const imageUrl = extractHeroImageUrl(l.images);
+        if (!imageUrl) continue;
+        used.add(i);
+        return {
+          addressKey: target.addressKey,
+          imageUrl,
+          matchReason: 'address',
+        };
+      }
+    }
+    return undefined;
+  };
+
+  // Subject first — we prefer giving the subject any address-matching
+  // listing even if that same listing could match a comp (which
+  // shouldn't happen in practice but guard against it).
+  let subjectMatch: MatchResult | undefined;
+  if (subject) {
+    subjectMatch = tryAddressMatch(subject);
+  }
+
+  for (const comp of comps) {
+    const address = tryAddressMatch({
+      addressKey: comp.addressKey,
+      fullAddress: comp.fullAddress,
+    });
+    if (address) {
+      out.push(address);
+      continue;
+    }
+
+    // Comp-only fallback: price + date match (handles spelling variants).
+    const compDate = comp.saleDateIso?.slice(0, 10);
+    let matchedIndex = -1;
+    for (let i = 0; i < listings.length; i++) {
+      if (used.has(i)) continue;
+      const l = listings[i];
+      const lPrice = parseReaPriceToNumber(l?.price?.display);
+      const lDate = l?.dateSold?.value?.slice(0, 10);
+      if (!lPrice || !lDate) continue;
+      if (lPrice === comp.salePrice && lDate === compDate) {
         matchedIndex = i;
         break;
       }
     }
-
-    if (matchedIndex === -1) {
-      // 2. Fallback: price + date match.
-      const compDate = comp.saleDateIso?.slice(0, 10);
-      for (let i = 0; i < listings.length; i++) {
-        if (used.has(i)) continue;
-        const l = listings[i];
-        const lPrice = parseReaPriceToNumber(l?.price?.display);
-        const lDate = l?.dateSold?.value?.slice(0, 10);
-        if (!lPrice || !lDate) continue;
-        if (lPrice === comp.salePrice && lDate === compDate) {
-          matchedIndex = i;
-          break;
-        }
-      }
-    }
-
     if (matchedIndex === -1) continue;
-    const listing = listings[matchedIndex];
-    const imageUrl = extractHeroImageUrl(listing.images);
+    const imageUrl = extractHeroImageUrl(listings[matchedIndex].images);
     if (!imageUrl) continue;
     used.add(matchedIndex);
     out.push({
       addressKey: comp.addressKey,
       imageUrl,
-      matchReason:
-        compNorm.includes(normaliseAddress(listing.address.streetAddress))
-          ? 'address'
-          : 'price+date',
+      matchReason: 'price+date',
     });
   }
 
-  return out;
+  return { comps: out, subject: subjectMatch };
 }
 
 function extractPostcode(addr: string | undefined): string | undefined {

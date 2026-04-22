@@ -48,6 +48,12 @@ const PollRequest = z.object({
     )
     .min(1)
     .max(20),
+  subject: z
+    .object({
+      addressKey: z.string().min(1),
+      fullAddress: z.string().min(1),
+    })
+    .optional(),
 });
 
 export async function POST(req: Request) {
@@ -77,7 +83,7 @@ export async function POST(req: Request) {
     );
   }
 
-  const { runId, datasetId, comps } = parsed.data;
+  const { runId, datasetId, comps, subject } = parsed.data;
 
   try {
     const snap = await getRunStatus(runId);
@@ -115,8 +121,12 @@ export async function POST(req: Request) {
       saleDateIso: c.saleDateIso,
     }));
 
-    const matched = matchListingsToComps(compsForMatch, soldOnly);
-    const matchedKeys = new Set(matched.map((m) => m.addressKey));
+    const matchResult = matchListingsToComps(
+      compsForMatch,
+      soldOnly,
+      subject,
+    );
+    const matchedKeys = new Set(matchResult.comps.map((m) => m.addressKey));
     const unmatchedAddressKeys = comps
       .map((c) => c.addressKey)
       .filter((k) => !matchedKeys.has(k));
@@ -127,8 +137,9 @@ export async function POST(req: Request) {
         runId,
         datasetId,
         totalListings: items.length,
-        matchedCount: matched.length,
+        matchedCount: matchResult.comps.length,
         unmatchedCount: unmatchedAddressKeys.length,
+        subjectMatched: !!matchResult.subject,
       }),
     );
 
@@ -138,7 +149,8 @@ export async function POST(req: Request) {
       runId,
       datasetId,
       totalListings: items.length,
-      matched,
+      matched: matchResult.comps,
+      subjectMatch: matchResult.subject ?? null,
       unmatchedAddressKeys,
     });
   } catch (err) {

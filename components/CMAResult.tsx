@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { computeCMA } from '@/lib/cma/compute';
 import { computeMaxPrice } from '@/lib/cma/maxprice';
@@ -297,18 +297,28 @@ export function CMAResult({
       setAutoFetching('polling');
       const maxAttempts = 60;
       const pollIntervalMs = 3000;
-      let matched: Array<{
+      type Match = {
         addressKey: string;
         imageUrl: string;
         matchReason: 'address' | 'price+date';
-      }> = [];
+      };
+      let matched: Match[] = [];
+      let subjectMatch: Match | null = null;
       let unmatched: string[] = [];
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
         await new Promise((r) => setTimeout(r, pollIntervalMs));
         const pollRes = await fetch('/api/photos/poll', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ runId, datasetId, comps: activeComps }),
+          body: JSON.stringify({
+            runId,
+            datasetId,
+            comps: activeComps,
+            subject: {
+              addressKey: subject.addressKey,
+              fullAddress: subject.fullAddress,
+            },
+          }),
         });
         if (!pollRes.ok) {
           const err = await pollRes.json().catch(() => ({}));
@@ -317,40 +327,49 @@ export function CMAResult({
         const body = (await pollRes.json()) as {
           status: string;
           finished: boolean;
-          matched?: typeof matched;
+          matched?: Match[];
+          subjectMatch?: Match | null;
           unmatchedAddressKeys?: string[];
         };
         if (body.finished) {
           matched = body.matched ?? [];
+          subjectMatch = body.subjectMatch ?? null;
           unmatched = body.unmatchedAddressKeys ?? [];
           break;
         }
       }
 
-      if (matched.length === 0 && unmatched.length === 0) {
+      if (matched.length === 0 && !subjectMatch && unmatched.length === 0) {
         throw new Error(
           'Scrape timed out after 3 minutes without finishing. Try again or paste URLs manually.',
         );
       }
 
-      // 3. Merge matched image URLs into imageUrls state.
-      if (matched.length > 0) {
-        setImageUrls((prev) => {
-          const next = { ...prev };
-          for (const m of matched) {
-            next[m.addressKey] = m.imageUrl;
-          }
-          return next;
-        });
-      }
+      // 3. Merge matched image URLs into imageUrls state (subject uses
+      //    the special SUBJECT_KEY so the UI's subject URL input shows it).
+      setImageUrls((prev) => {
+        const next = { ...prev };
+        for (const m of matched) next[m.addressKey] = m.imageUrl;
+        if (subjectMatch) next[SUBJECT_KEY] = subjectMatch.imageUrl;
+        return next;
+      });
       setAutoFetchUnmatched(unmatched);
       setAutoFetching('done');
 
-      // 4. Chain straight into Claude Vision. This reads the fresh
-      //    imageUrls via runVisionAnalysis — but React state update
-      //    is async, so rather than relying on it we inline the calls.
-      if (matched.length > 0) {
-        await analyzeImagesDirect(matched);
+      // 4. Chain straight into Claude Vision. Include subject match if
+      //    we found one — the subject's visual attrs are half the
+      //    similarity comparison.
+      const visionTargets: Array<{ addressKey: string; imageUrl: string }> = [
+        ...matched,
+      ];
+      if (subjectMatch) {
+        visionTargets.push({
+          addressKey: SUBJECT_KEY,
+          imageUrl: subjectMatch.imageUrl,
+        });
+      }
+      if (visionTargets.length > 0) {
+        await analyzeImagesDirect(visionTargets);
       }
     } catch (err) {
       setAutoFetchError(err instanceof Error ? err.message : String(err));
@@ -360,20 +379,36 @@ export function CMAResult({
 
   /**
    * Chain: after auto-fetch succeeds, run the vision analysis on the
-   * fresh URLs without waiting for a state-update round trip.
+   * fresh URLs without waiting for a state-update round trip. Subject
+   * entries (addressKey === SUBJECT_KEY) are split out into the
+   * /api/vision body's `subject` field so the server routes them to
+   * the subject slot in the response — they then land in visionMap
+   * under SUBJECT_KEY, which is what deriveVisualAdjustment reads for
+   * the subject side of each comp comparison.
    */
   async function analyzeImagesDirect(
-    matched: Array<{ addressKey: string; imageUrl: string }>,
+    targets: Array<{ addressKey: string; imageUrl: string }>,
   ) {
+    if (targets.length === 0) return;
     setAnalyzing(true);
     setVisionError(null);
     try {
+      const subjectTarget = targets.find((t) => t.addressKey === SUBJECT_KEY);
+      const compTargets = targets.filter((t) => t.addressKey !== SUBJECT_KEY);
+
       const body: Record<string, unknown> = {
-        comps: matched.map((m) => ({
-          addressKey: m.addressKey,
-          imageUrl: m.imageUrl,
+        comps: compTargets.map((c) => ({
+          addressKey: c.addressKey,
+          imageUrl: c.imageUrl,
         })),
       };
+      if (subjectTarget) {
+        body.subject = {
+          addressKey: subject.addressKey,
+          imageUrl: subjectTarget.imageUrl,
+        };
+      }
+
       const res = await fetch('/api/vision', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -384,6 +419,7 @@ export function CMAResult({
         throw new Error(err?.error ?? `Vision failed (${res.status})`);
       }
       const result = (await res.json()) as {
+        subject?: { attrs: VisionAttributes | null; error?: string };
         comps: Array<{
           addressKey: string;
           attrs: VisionAttributes | null;
@@ -392,15 +428,18 @@ export function CMAResult({
       };
       setVisionMap((prev) => {
         const next = { ...prev };
+        if (result.subject?.attrs) next[SUBJECT_KEY] = result.subject.attrs;
         for (const r of result.comps) {
           if (r.attrs) next[r.addressKey] = r.attrs;
         }
         return next;
       });
-      const failed = result.comps.filter((c) => c.attrs == null);
-      if (failed.length > 0) {
+      const compFails = result.comps.filter((c) => c.attrs == null).length;
+      const subjFail = result.subject && !result.subject.attrs ? 1 : 0;
+      const total = compFails + subjFail;
+      if (total > 0) {
         setVisionError(
-          `${failed.length} image(s) couldn't be classified by Claude Vision.`,
+          `${total} image(s) couldn't be classified by Claude Vision.`,
         );
       }
     } catch (err) {
@@ -409,6 +448,26 @@ export function CMAResult({
       setAnalyzing(false);
     }
   }
+
+  /**
+   * Auto-fire the photo fetch once, right after the CMA first loads.
+   * Uses a ref rather than a state flag so React 18's dev-mode double
+   * effect invocation doesn't kick off two Apify runs. Gracefully
+   * no-ops if the /api/photos/start route returns an error (e.g. when
+   * APIFY_API_TOKEN is unset) — user can still fall back to manual URL
+   * paste.
+   */
+  const autoFiredRef = useRef(false);
+  useEffect(() => {
+    if (autoFiredRef.current) return;
+    if (!subject.postcode || !subject.suburb || !subject.state) return;
+    autoFiredRef.current = true;
+    runAutoFetch().catch(() => {
+      // runAutoFetch already surfaces errors via state; swallow the
+      // rejection so it doesn't become an unhandled promise.
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div className="space-y-6">

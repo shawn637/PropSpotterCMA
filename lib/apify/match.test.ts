@@ -215,22 +215,18 @@ test('matchListingsToComps: exact address matches produce address-reason hits', 
       saleDateIso: '2026-03-04',
     }),
   ];
-  const matches = matchListingsToComps(comps, liveReaListings);
-  assert.equal(matches.length, 2);
-  assert.equal(matches[0].addressKey, 'COMP-BENTWOOD');
+  const result = matchListingsToComps(comps, liveReaListings);
+  assert.equal(result.comps.length, 2);
+  assert.equal(result.comps[0].addressKey, 'COMP-BENTWOOD');
   assert.equal(
-    matches[0].imageUrl,
+    result.comps[0].imageUrl,
     'https://i3.au.reastatic.net/.../bentwood-main.jpg',
   );
-  assert.equal(matches[0].matchReason, 'address');
+  assert.equal(result.comps[0].matchReason, 'address');
+  assert.equal(result.subject, undefined);
 });
 
 test('matchListingsToComps: handles spelling variants via price+date fallback', () => {
-  // HTAG returned "18 Spicebush Glade"; REA has "18 Spicebush Gld". The
-  // address normalisation catches this because "18 spicebush gld" is a
-  // substring of "18 spicebush glade stanhope gardens nsw 2768" via the
-  // reverse `streetNorm.includes(compNorm)` branch — wait, neither side
-  // fully contains the other. Check price+date match works.
   const comps: Comparable[] = [
     makeComp({
       addressKey: 'COMP-SPICEBUSH',
@@ -239,17 +235,13 @@ test('matchListingsToComps: handles spelling variants via price+date fallback', 
       saleDateIso: '2026-02-18',
     }),
   ];
-  const matches = matchListingsToComps(comps, liveReaListings);
-  assert.equal(matches.length, 1);
-  assert.equal(matches[0].addressKey, 'COMP-SPICEBUSH');
+  const result = matchListingsToComps(comps, liveReaListings);
+  assert.equal(result.comps.length, 1);
+  assert.equal(result.comps[0].addressKey, 'COMP-SPICEBUSH');
   assert.equal(
-    matches[0].imageUrl,
+    result.comps[0].imageUrl,
     'https://i3.au.reastatic.net/.../spicebush-main.jpg',
   );
-  // This is a genuine tie-break test: the matcher is free to use either
-  // 'address' (normaliseAddress happens to make "18 spicebush gld" a
-  // substring match) or 'price+date'. Both are valid; don't assert the
-  // specific reason.
 });
 
 test('matchListingsToComps: each listing only consumed once', () => {
@@ -261,30 +253,73 @@ test('matchListingsToComps: each listing only consumed once', () => {
       saleDateIso: '2026-04-14',
     }),
     makeComp({
-      // Same listing — if the matcher re-used, both would hit.
       addressKey: 'SECOND',
       fullAddress: '74 Bentwood Terrace, Stanhope Gardens NSW 2768',
       salePrice: 1_620_300,
       saleDateIso: '2026-04-14',
     }),
   ];
-  const matches = matchListingsToComps(comps, liveReaListings);
-  assert.equal(matches.length, 1);
-  assert.equal(matches[0].addressKey, 'FIRST');
+  const result = matchListingsToComps(comps, liveReaListings);
+  assert.equal(result.comps.length, 1);
+  assert.equal(result.comps[0].addressKey, 'FIRST');
 });
 
 test('matchListingsToComps: unmatched comps are silently dropped', () => {
   const comps: Comparable[] = [
     makeComp({
       addressKey: 'COMP-ROCHDALE',
-      // Not in our 3-listing fixture — no photo available on REA.
       fullAddress: '7 Rochdale Circuit, Stanhope Gardens NSW 2768',
       salePrice: 1_500_000,
       saleDateIso: '2026-04-16',
     }),
   ];
-  const matches = matchListingsToComps(comps, liveReaListings);
-  assert.equal(matches.length, 0);
+  const result = matchListingsToComps(comps, liveReaListings);
+  assert.equal(result.comps.length, 0);
+});
+
+test('matchListingsToComps: subject matches a listing by address when included', () => {
+  const result = matchListingsToComps([], liveReaListings, {
+    addressKey: 'SUBJECT',
+    fullAddress: '74 Bentwood Terrace, Stanhope Gardens NSW 2768',
+  });
+  assert.ok(result.subject);
+  assert.equal(result.subject!.addressKey, 'SUBJECT');
+  assert.equal(
+    result.subject!.imageUrl,
+    'https://i3.au.reastatic.net/.../bentwood-main.jpg',
+  );
+  assert.equal(result.subject!.matchReason, 'address');
+});
+
+test('matchListingsToComps: subject takes priority over comp for the shared listing', () => {
+  // If a subject + a comp would both match the same listing, subject
+  // wins — the matcher consumes listings as it goes and subject is
+  // attempted first.
+  const comps: Comparable[] = [
+    makeComp({
+      addressKey: 'COMP-WITH-SAME-ADDR',
+      fullAddress: '74 Bentwood Terrace, Stanhope Gardens NSW 2768',
+      salePrice: 1_620_300,
+      saleDateIso: '2026-04-14',
+    }),
+  ];
+  const result = matchListingsToComps(comps, liveReaListings, {
+    addressKey: 'SUBJECT',
+    fullAddress: '74 Bentwood Terrace, Stanhope Gardens NSW 2768',
+  });
+  assert.equal(result.subject?.addressKey, 'SUBJECT');
+  // Comp falls through to the price+date fallback, which also matches
+  // because price + date match on the same record… but the record was
+  // already consumed by subject. So comp gets no match.
+  assert.equal(result.comps.length, 0);
+});
+
+test('matchListingsToComps: subject with no matching listing returns undefined', () => {
+  const result = matchListingsToComps([], liveReaListings, {
+    addressKey: 'SUBJECT',
+    fullAddress: '999 Unknown Street, Stanhope Gardens NSW 2768',
+  });
+  assert.equal(result.subject, undefined);
 });
 
 test('matchListingsToComps: listing with only a floorplan has no hero image and is skipped', () => {
@@ -314,6 +349,6 @@ test('matchListingsToComps: listing with only a floorplan has no hero image and 
       ],
     },
   ];
-  const matches = matchListingsToComps(compsList, stripped);
-  assert.equal(matches.length, 0);
+  const result = matchListingsToComps(compsList, stripped);
+  assert.equal(result.comps.length, 0);
 });
