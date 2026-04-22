@@ -92,8 +92,18 @@ export function CMAResult({
   onReset,
   pdfBusy,
 }: CMAResultProps) {
-  const { subject, market, vendorAssessment, narrative } = data;
+  const { subject, market, vendorAssessment } = data;
   const originalComps = data.cma.comparables;
+
+  // Narrative is kept in client state so we can regenerate it after
+  // Vision lands (or the user edits exclusions). Seeded from the
+  // server's initial /api/cma response.
+  const [narrative, setNarrative] = useState<string>(data.narrative);
+  const [narrativeBusy, setNarrativeBusy] = useState(false);
+  const [narrativeError, setNarrativeError] = useState<string | null>(null);
+  // True once the post-Vision regeneration has fired, so we don't
+  // re-fire it on every re-render.
+  const narrativeRegeneratedRef = useRef(false);
 
   // Client-side toggle state. Keys in this set are comps the user has
   // manually excluded from the running CMA.
@@ -157,6 +167,10 @@ export function CMAResult({
       subject: subjectWithVision,
       cma: recomputedCma,
       maxPrice: recomputedMax,
+      // Use the client-side narrative state so PDF downloads + the
+      // /api/narrative POST (which echoes `current`) carry the most
+      // recent regenerated prose, not the stale server seed.
+      narrative,
     };
     return { current: currentResult, enoughComps: enough };
   }, [
@@ -167,6 +181,7 @@ export function CMAResult({
     market,
     vendorAssessment.motivation,
     data,
+    narrative,
   ]);
 
   const cma = current.cma;
@@ -505,10 +520,55 @@ export function CMAResult({
           `${total} image(s) couldn't be classified by Claude Vision.`,
         );
       }
+
+      // Kick the narrative regeneration so the prose references the
+      // just-computed visual attributes. Only fire once per session —
+      // subsequent tweaks are a manual button. Swallow errors; the
+      // initial server narrative remains on screen if this fails.
+      if (!narrativeRegeneratedRef.current) {
+        narrativeRegeneratedRef.current = true;
+        // Defer by a tick so React has flushed setVisionMap and useMemo
+        // has recomputed `current` with the fresh attrs in place.
+        setTimeout(() => {
+          void regenerateNarrative();
+        }, 0);
+      }
     } catch (err) {
       setVisionError(err instanceof Error ? err.message : String(err));
     } finally {
       setAnalyzing(false);
+    }
+  }
+
+  /**
+   * Regenerate the narrative paragraph against the client's CURRENT
+   * result (post-exclusion + post-Vision). Uses a functional state
+   * update style via the `current` closure so it's always reading the
+   * latest `current` when the button is clicked — critical for the
+   * manual-regenerate case after the user toggles a comp.
+   */
+  async function regenerateNarrative() {
+    setNarrativeBusy(true);
+    setNarrativeError(null);
+    try {
+      const res = await fetch('/api/narrative', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        // current is always the live snapshot from useMemo.
+        body: JSON.stringify(current),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err?.error ?? `Narrative failed (${res.status})`);
+      }
+      const body = (await res.json()) as { narrative?: string };
+      if (typeof body.narrative === 'string' && body.narrative.length > 0) {
+        setNarrative(body.narrative);
+      }
+    } catch (err) {
+      setNarrativeError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setNarrativeBusy(false);
     }
   }
 
@@ -855,10 +915,25 @@ export function CMAResult({
       </section>
 
       <section className="rounded-lg bg-white border border-slate-200 p-4">
-        <h3 className="text-sm font-semibold text-navy mb-2">Narrative</h3>
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="text-sm font-semibold text-navy">Narrative</h3>
+          <button
+            onClick={regenerateNarrative}
+            disabled={narrativeBusy || analyzing || !enoughComps}
+            className="text-xs rounded-md border border-slate-300 px-2 py-1 hover:bg-slate-50 disabled:opacity-50"
+            title="Rewrite the narrative using the current comparables, numbers, and Vision findings."
+          >
+            {narrativeBusy ? 'Regenerating…' : 'Regenerate'}
+          </button>
+        </div>
         <p className="text-sm text-slate-700 whitespace-pre-line leading-relaxed">
           {narrative}
         </p>
+        {narrativeError && (
+          <p className="mt-2 text-xs text-amber-700">
+            Couldn&rsquo;t regenerate: {narrativeError}
+          </p>
+        )}
       </section>
 
       <div className="flex flex-wrap gap-3">

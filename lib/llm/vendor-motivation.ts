@@ -7,7 +7,46 @@ import type {
   PropertyDetails,
   VendorAssessment,
   VendorMotivation,
+  VisionAttributes,
 } from '@/lib/types';
+
+/**
+ * Render a VisionAttributes into a compact one-liner for the narrative
+ * prompt. Only surfaces fields that have real information — 'unknown'
+ * / 'not_visible' are dropped so we don't pollute the model's context
+ * with noise. Features are joined with commas, prefixed by "features:"
+ * so the model can distinguish from the structured condition fields.
+ */
+function formatVisionForPrompt(v: VisionAttributes): string {
+  const parts: string[] = [];
+  if (v.storeys !== 'unknown') parts.push(v.storeys);
+  if (v.constructionMaterial !== 'unknown') parts.push(v.constructionMaterial);
+  if (v.conditionGrade !== 'unknown')
+    parts.push(`overall condition ${v.conditionGrade}`);
+  if (v.kitchenCondition !== 'unknown' && v.kitchenCondition !== 'not_visible')
+    parts.push(`kitchen ${v.kitchenCondition}`);
+  if (
+    v.bathroomCondition !== 'unknown' &&
+    v.bathroomCondition !== 'not_visible'
+  )
+    parts.push(`bathroom ${v.bathroomCondition}`);
+  if (v.landQuality !== 'unknown') parts.push(`land ${v.landQuality}`);
+  if (v.backyardSize !== 'unknown') parts.push(`backyard ${v.backyardSize}`);
+  if (v.features.length > 0)
+    parts.push(`features: ${v.features.map((f) => f.replace(/_/g, ' ')).join(', ')}`);
+  if (v.notes) parts.push(`notes: ${v.notes}`);
+  return parts.length > 0 ? parts.join('; ') : 'no meaningful signal';
+}
+
+function shortDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString('en-AU', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  });
+}
 
 export interface TokenUsage {
   input: number;
@@ -168,20 +207,44 @@ export async function generateNarrative(args: {
 }): Promise<NarrativeResult> {
   if (!hasApiKey()) return { text: fallbackNarrative(args) };
 
+  const subjectVision = args.subject.visionAttrs;
+  const subjectVisionLine = subjectVision
+    ? `- Subject visual profile (Claude Vision, synthesised across the listing gallery): ${formatVisionForPrompt(subjectVision)}`
+    : '- Subject visual profile: not analysed (no photos available)';
+
+  // Up to 8 comp lines so the model can name specific comps in the
+  // narrative rather than treating them as a faceless "set". Include
+  // each comp's vision profile when present — that's what lets the
+  // writer explain WHY a particular comp landed where it did.
+  const compLines = args.cma.comparables
+    .slice(0, 8)
+    .map((c) => {
+      const vision = c.visionAttrs
+        ? formatVisionForPrompt(c.visionAttrs)
+        : 'no visual profile';
+      return `  * ${c.fullAddress} — sold $${c.salePrice.toLocaleString()} (${shortDate(c.saleDateIso)}), adj ${c.adjustmentFactor.toFixed(3)} → implied $${Math.round(c.impliedSubjectValue).toLocaleString()}; ${vision}`;
+    })
+    .join('\n');
+
   const prompt = `${BRAND_RULES}
 
-Write a 2-3 paragraph narrative (plain prose, no headings, no bullet lists, no markdown) for a PropSpotter CMA report. Tone: professional, direct, educational. Around 180 words.
+Write a 3-4 paragraph narrative (plain prose, no headings, no bullet lists, no markdown) for a PropSpotter CMA report. Tone: professional, direct, educational. Around 250 words.
 
-Paragraph 1: describe the subject property and summarise the CMA fair value. Mention the comparables count and whether the spread is tight or wide.
+Paragraph 1: describe the subject property, including its visual profile if provided (overall condition, kitchen, bathroom, land quality, notable features like pool or main-road exposure). Summarise the CMA fair value, comparables count, and whether the spread is tight or wide.
 
-Paragraph 2: explain the market context (cycle stage, growth, typical days on market vs actual) and the vendor assessment in plain language. Do NOT say "buyers agent" or "buyers agency". Do NOT tell the reader what to pay — describe the three numbers as information the reader can use.
+Paragraph 2: comment on the COMPARABLE SET. Reference at least two specific comparables by street address and explain what they tell us — e.g. "a renovated single-storey on X Street sold for Y; a dated comparable on Z sold for less." Call out when the vision data shows meaningful differences between subject and comps (renovated kitchen vs dated, pool asymmetry, different landscaping tier). Do not invent condition data — only reference what's supplied in the Data section below.
 
-Paragraph 3: walk through the three numbers (opening offer, target, walk-away max) and what each represents in negotiation terms. Close with a reminder that the reader makes the final decision.
+Paragraph 3: explain the market context (cycle stage, growth, typical days on market vs actual) and the vendor assessment in plain language. Do NOT say "buyers agent" or "buyers agency". Do NOT tell the reader what to pay — describe the three numbers as information the reader can use.
+
+Paragraph 4: walk through the three numbers (opening offer, target, walk-away max) and what each represents in negotiation terms. Close with a reminder that the reader makes the final decision.
 
 Data:
-- Subject: ${args.subject.fullAddress} (${args.subject.propertyType ?? 'House'}, ${args.subject.bedrooms ?? '?'}BR / ${args.subject.bathrooms ?? '?'}BA / ${args.subject.landAreaSqm ?? '?'}sqm)
+- Subject: ${args.subject.fullAddress} (${args.subject.propertyType ?? 'House'}, ${args.subject.bedrooms ?? '?'}BR / ${args.subject.bathrooms ?? '?'}BA / ${args.subject.landAreaSqm ?? '?'}sqm land / ${args.subject.floorAreaSqm ?? '?'}sqm floor)
+${subjectVisionLine}
 - CMA fair value: $${args.cma.fairValue.toLocaleString()} (range $${args.cma.fairValueLow.toLocaleString()}-$${args.cma.fairValueHigh.toLocaleString()}, dispersion ${(args.cma.dispersion * 100).toFixed(1)}%)
 - Comparables used: ${args.cma.comparables.length}
+- Comparable set:
+${compLines}
 - Market: ${args.market.suburb} ${args.market.state}, cycle ${args.market.cycleStage}, 5y growth ${(args.market.annualisedGrowth5y * 100).toFixed(1)}%, typical DOM ${args.market.typicalDaysOnMarket}
 - Actual DOM: ${args.actualDaysOnMarket ?? 'not provided'}
 - Vendor: ${args.vendorAssessment.motivation} (confidence ${(args.vendorAssessment.confidence * 100).toFixed(0)}%) — ${args.vendorAssessment.rationale}
@@ -193,7 +256,7 @@ Data:
     const client = makeClient();
     const response = await client.messages.create({
       model: model(),
-      max_tokens: 800,
+      max_tokens: 1200,
       system: BRAND_RULES,
       messages: [{ role: 'user', content: prompt }],
     });
