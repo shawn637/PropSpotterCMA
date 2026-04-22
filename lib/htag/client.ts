@@ -130,13 +130,15 @@ export async function getSubjectProperty(
     };
   }
 
-  // TODO(htag-live): confirm standardise endpoint path and response fields.
-  // Expected keys: address_key, formatted_address, suburb, state, postcode, loc_pid.
+  // HTAG's standardise endpoint is a batch: the request takes an
+  // `addresses` array and the response is also array-shaped. We still
+  // only ever send one address at a time, so we unwrap results[0].
   const standardisePath = '/v1/address/standardise';
-  const standardised = await rawHtagFetch<Record<string, unknown>>(
+  const standardiseResponse = await rawHtagFetch<Record<string, unknown>>(
     standardisePath,
-    { method: 'POST', body: JSON.stringify({ address }) },
+    { method: 'POST', body: JSON.stringify({ addresses: [address] }) },
   );
+  const standardised = unwrapBatchResult(standardiseResponse, standardisePath);
 
   const addressKey = requireString(standardised, 'address_key', standardisePath);
   const fullAddress = requireString(standardised, 'formatted_address', standardisePath);
@@ -283,6 +285,52 @@ function topLevelKeys(value: unknown): string[] {
     return Object.keys(value).slice(0, 20);
   }
   return [];
+}
+
+/**
+ * HTAG's batch-shaped endpoints (e.g. standardise) return either a bare
+ * array or an object wrapping an array under `results`/`data`/`addresses`.
+ * We send a single-element request every time, so unwrap to the first
+ * element. If no array wrapping is found we return the raw object, so
+ * a flat single-result response still works.
+ */
+function unwrapBatchResult(
+  response: unknown,
+  endpoint: string,
+): Record<string, unknown> {
+  if (Array.isArray(response)) {
+    if (response.length === 0) {
+      throw new HtagError(
+        `HTAG ${endpoint} returned an empty array.`,
+        endpoint,
+      );
+    }
+    const first = response[0];
+    if (typeof first === 'object' && first !== null) {
+      return first as Record<string, unknown>;
+    }
+    throw new HtagError(
+      `HTAG ${endpoint} array element is not an object.`,
+      endpoint,
+    );
+  }
+  if (typeof response === 'object' && response !== null) {
+    const obj = response as Record<string, unknown>;
+    for (const key of ['results', 'data', 'addresses']) {
+      const inner = obj[key];
+      if (Array.isArray(inner) && inner.length > 0) {
+        const first = inner[0];
+        if (typeof first === 'object' && first !== null) {
+          return first as Record<string, unknown>;
+        }
+      }
+    }
+    return obj;
+  }
+  throw new HtagError(
+    `HTAG ${endpoint} response is not an object or array.`,
+    endpoint,
+  );
 }
 
 function requireString(

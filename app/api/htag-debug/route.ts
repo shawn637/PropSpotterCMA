@@ -78,19 +78,21 @@ export async function POST(req: Request) {
   let addressKey: string | undefined;
   let derivedLocPid: string | undefined = parsed.locPid;
 
-  // Stage 1: standardise
+  // Stage 1: standardise. HTAG expects a batch request (addresses array)
+  // and returns array-shaped results. Flatten to the first result for
+  // downstream key extraction.
   const standardised = await runStage(
     stages,
     'standardise',
     '/v1/address/standardise',
     'POST',
-    JSON.stringify({ address: parsed.address }),
+    JSON.stringify({ addresses: [parsed.address] }),
   );
-  if (standardised && typeof standardised === 'object') {
-    const obj = standardised as Record<string, unknown>;
-    if (typeof obj.address_key === 'string') addressKey = obj.address_key;
-    if (!derivedLocPid && typeof obj.loc_pid === 'string') {
-      derivedLocPid = obj.loc_pid;
+  const flat = flattenFirstResult(standardised);
+  if (flat) {
+    if (typeof flat.address_key === 'string') addressKey = flat.address_key;
+    if (!derivedLocPid && typeof flat.loc_pid === 'string') {
+      derivedLocPid = flat.loc_pid;
     }
   }
 
@@ -199,4 +201,32 @@ async function runStage(
     stages.push(stage);
     return null;
   }
+}
+
+/**
+ * Batch endpoints return either a bare array or an object wrapping an
+ * array. Returns the first element as a flat object, or null if the
+ * response can't be flattened — the stage record already shows the raw
+ * body so you can see the true shape anyway.
+ */
+function flattenFirstResult(response: unknown): Record<string, unknown> | null {
+  if (Array.isArray(response)) {
+    return typeof response[0] === 'object' && response[0] !== null
+      ? (response[0] as Record<string, unknown>)
+      : null;
+  }
+  if (typeof response === 'object' && response !== null) {
+    const obj = response as Record<string, unknown>;
+    for (const key of ['results', 'data', 'addresses']) {
+      const inner = obj[key];
+      if (Array.isArray(inner) && inner.length > 0) {
+        const first = inner[0];
+        if (typeof first === 'object' && first !== null) {
+          return first as Record<string, unknown>;
+        }
+      }
+    }
+    return obj;
+  }
+  return null;
 }
