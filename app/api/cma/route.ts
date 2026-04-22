@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { computeCMA } from '@/lib/cma/compute';
 import { computeMaxPrice } from '@/lib/cma/maxprice';
 import {
+  HtagError,
   getComparables,
   getMarketContext,
   getSubjectProperty,
@@ -115,6 +116,19 @@ export async function POST(req: Request) {
     return NextResponse.json(payload, { headers: rateLimitHeaders(rl) });
   } catch (err) {
     console.error('CMA route failed:', err);
+    if (err instanceof HtagError) {
+      // Upstream data provider failed. Surface the endpoint so the issue
+      // is actionable (maps 1:1 to a TODO(htag-live) marker in the
+      // client). Use /api/htag-debug to probe the endpoint directly.
+      return NextResponse.json(
+        {
+          error: `HTAG upstream failed at ${err.endpoint}: ${err.message}`,
+          endpoint: err.endpoint,
+          upstreamStatus: err.status,
+        },
+        { status: 502 },
+      );
+    }
     const message = err instanceof Error ? err.message : 'CMA generation failed.';
     return NextResponse.json({ error: message }, { status: 500 });
   }

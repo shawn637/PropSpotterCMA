@@ -78,23 +78,78 @@ Vercel Pro → Usage → set a soft cap. Function invocations and bandwidth are 
 
 Only run this after Phase 2 is complete and you've confirmed the gate works.
 
+### 3.1 Turn on live mode
+
 1. **Credentials.** Add to Vercel env vars:
    ```
    HTAG_API_KEY=<from HTAG Developer Portal>
    HTAG_API_BASE_URL=https://api.prod.htagai.com   # or whatever your portal shows
    MOCK_DATA=false
    ```
-2. **Redeploy.** `vercel --prod`.
-3. **Tail function logs.** In Vercel dashboard → project → Logs → filter to `/api/cma`.
-4. **Test with a real Sydney address you have a known `loc_pid` for** (e.g. Baulkham Hills NSW231, Stanhope Gardens NSW3682).
-5. **Walk the five `TODO(htag-live):` comments in `lib/htag/client.ts`.** Each marks a place where the real API's field names or endpoint path need round-trip confirmation:
+2. **Redeploy.** `vercel --prod`. Env changes don't apply to existing deployments.
+
+### 3.2 Probe the API with `/api/htag-debug` (fast path)
+
+The debug endpoint hits every HTAG endpoint the app depends on and returns the raw JSON from each, so you can confirm response shapes without running the full pipeline. This is the primary tool for Phase 3 — it collapses the iteration loop from "deploy → tail logs → edit → redeploy" to one `curl` invocation.
+
+```bash
+curl -u any:"$APP_PASSWORD" \
+  -X POST https://<your-vercel-url>/api/htag-debug \
+  -H 'Content-Type: application/json' \
+  -d '{"address":"42 Example St, Baulkham Hills NSW 2153","locPid":"NSW231"}' \
+  | jq
+```
+
+Response shape:
+```jsonc
+{
+  "mode": "live",
+  "requestedAddress": "...",
+  "derivedAddressKey": "...",   // what standardise returned
+  "derivedLocPid": "NSW231",
+  "stages": [
+    {
+      "name": "standardise",
+      "endpoint": "/v1/address/standardise",
+      "ok": true,
+      "status": 200,
+      "elapsedMs": 142,
+      "responseKeys": ["address_key", "formatted_address", ...],  // ← map these against lib/htag/client.ts
+      "body": { /* full raw JSON */ }
+    },
+    // ... one stage per endpoint
+  ]
+}
+```
+
+For each stage where `ok: false`, read the `error` message and compare `responseKeys` to what the client expects. Then:
+
+1. **Edit `lib/htag/client.ts`** — each of the five `TODO(htag-live):` markers corresponds to a pair of expectations the debug output will confirm or deny:
    - `TODO(htag-live): 1` — auth header. HTAG likely takes one of `X-API-Key` or `Authorization: Bearer`. The client sends both; remove the unused one once confirmed.
    - `TODO(htag-live): 2` — standardise endpoint response shape.
    - `TODO(htag-live): 3` — property summary fields.
    - `TODO(htag-live): 4` — sold-search endpoint path + body.
    - `TODO(htag-live): 5` — market endpoints (growth / cycle / demand / summary).
-6. **Iterate** until `/api/cma` returns a CMA with ≥3 real comparables for your test address. The 422 path will engage if not — error message explains why.
-7. **Sanity check the three numbers** look plausible for the suburb. If fairValue is wildly off from your Excel tool's output, the likely culprit is `annualisedGrowth5y` being a different denomination (percent vs decimal) or comparables outside the suburb — check `cma.comparables[].fullAddress` in the JSON response.
+2. **Redeploy.** `vercel --prod`.
+3. **Re-run the debug probe.** Repeat until every stage returns `ok: true`.
+
+### 3.3 End-to-end smoke test
+
+Once the debug probe is green:
+
+1. **Tail function logs** in Vercel → Logs → filter to `/api/cma`. Look for `{"tag":"htag",...}` lines — each HTAG call emits one, logging endpoint / status / elapsed / top-level response keys (no PII).
+2. **Hit the full pipeline.** Use the UI with a real Sydney address you know (e.g. Baulkham Hills, Stanhope Gardens). Expect a real CMA with ≥ 3 comparable sales.
+3. **Sanity check the three numbers** look plausible for the suburb. If fairValue is wildly off from your Excel tool's output, the likely culprit is `annualisedGrowth5y` being a different denomination (percent vs decimal — HTAG might return `7.2` where the code expects `0.072`) or comparables outside the target suburb. Inspect `cma.comparables[].fullAddress` in the JSON response.
+4. **If `/api/cma` returns 502,** the error body includes `endpoint` and `upstreamStatus` — maps 1:1 to the debug-endpoint stage where you need to iterate further.
+5. **If it returns 422** ("Not enough recent comparable sales"), HTAG returned fewer than 3 sales after filtering. Widen the search in `lib/htag/client.ts`'s `getComparables` body (raise `radius_km` or `months_back`), redeploy, and retry.
+
+### 3.4 Clean up
+
+Once live is working end-to-end:
+
+1. **Remove the unused auth header** (`TODO(htag-live): 1`). Keep only the header HTAG actually accepts.
+2. **Delete the five `TODO(htag-live):` comments** once each has been confirmed against a real response.
+3. **Consider whether to keep `/api/htag-debug`.** It's handy for future upstream changes, but it leaks the real HTAG response shape to anyone behind the password gate. Either leave it (password is fine for a test deploy), wrap it in a separate `ENABLE_DEBUG=true` env var, or delete the route once field names are locked in.
 
 ---
 
@@ -137,5 +192,7 @@ In rough priority order.
 | `429 Too many requests` | In-memory rate limit tripped. Wait 1 minute or raise `RATE_LIMIT_PER_MINUTE`. |
 | Narrative sounds formulaic / repetitive | `ANTHROPIC_API_KEY` unset or Anthropic call failed — app fell back to deterministic prose. Check Vercel Logs. |
 | `422 Not enough recent comparable sales` | HTAG returned < 3 comparables after filtering. Widen search in `lib/htag/client.ts` (raise `radius_km` or `months_back`) and redeploy. |
+| `502 HTAG upstream failed at <endpoint>` | Live HTAG call failed or returned unexpected shape. Use `/api/htag-debug` to probe the named endpoint and see raw response keys. |
+| `501 htag-debug is only meaningful when MOCK_DATA=false` | You hit the debug endpoint while still in mock mode. Set `MOCK_DATA=false` + `HTAG_API_KEY` and redeploy. |
 | PDF downloads as a 0-byte file | Usually a `renderToBuffer` crash. Check Vercel Logs on `/api/pdf`. |
 | Vercel function times out | Hobby-plan 10s cap, or `maxDuration: 30` in `vercel.json` + slow HTAG upstream. Either bump the plan or swap `CLAUDE_MODEL` to Haiku. |
