@@ -10,7 +10,20 @@ import { NextRequest, NextResponse } from 'next/server';
  */
 export function middleware(req: NextRequest) {
   const expected = process.env.APP_PASSWORD;
-  if (!expected) return NextResponse.next();
+  const isVercelProd = process.env.VERCEL_ENV === 'production';
+
+  // Production safety rail: refuse to serve a Vercel production deployment
+  // without a password gate. Set APP_PASSWORD in Vercel project settings
+  // (any long random string) and redeploy. This prevents accidentally
+  // exposing a public URL that can burn Anthropic credits.
+  if (isVercelProd && !expected) {
+    return new NextResponse(
+      'This deployment is not configured. APP_PASSWORD must be set.',
+      { status: 503, headers: { 'Content-Type': 'text/plain; charset=utf-8' } },
+    );
+  }
+
+  if (!expected) return addNoIndex(NextResponse.next());
 
   const auth = req.headers.get('authorization') ?? '';
   if (auth.startsWith('Basic ')) {
@@ -19,7 +32,7 @@ export function middleware(req: NextRequest) {
       const idx = decoded.indexOf(':');
       const password = idx === -1 ? decoded : decoded.slice(idx + 1);
       if (timingSafeEqual(password, expected)) {
-        return NextResponse.next();
+        return addNoIndex(NextResponse.next());
       }
     } catch {
       /* fall through to 401 */
@@ -31,8 +44,14 @@ export function middleware(req: NextRequest) {
     headers: {
       'WWW-Authenticate': 'Basic realm="PropSpotter", charset="UTF-8"',
       'Content-Type': 'text/plain; charset=utf-8',
+      'X-Robots-Tag': 'noindex, nofollow',
     },
   });
+}
+
+function addNoIndex(res: NextResponse): NextResponse {
+  res.headers.set('X-Robots-Tag', 'noindex, nofollow');
+  return res;
 }
 
 function timingSafeEqual(a: string, b: string): boolean {

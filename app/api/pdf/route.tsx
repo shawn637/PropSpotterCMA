@@ -2,12 +2,28 @@ import { renderToBuffer } from '@react-pdf/renderer';
 import { NextResponse } from 'next/server';
 
 import { ValuationReport } from '@/lib/pdf/report';
+import { clientKey, rateLimit } from '@/lib/ratelimit';
 import type { FullValuationResult } from '@/lib/types';
 
 export const runtime = 'nodejs';
 export const maxDuration = 15;
 
 export async function POST(req: Request) {
+  const rl = rateLimit(`pdf:${clientKey(req)}`);
+  if (!rl.allowed) {
+    return NextResponse.json(
+      { error: 'Too many requests. Please wait a minute and try again.' },
+      {
+        status: 429,
+        headers: {
+          'X-RateLimit-Limit': String(rl.limit),
+          'X-RateLimit-Remaining': String(rl.remaining),
+          'X-RateLimit-Reset': String(Math.ceil(rl.resetAt / 1000)),
+        },
+      },
+    );
+  }
+
   let data: FullValuationResult;
   try {
     data = (await req.json()) as FullValuationResult;

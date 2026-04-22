@@ -13,6 +13,7 @@ import {
   assessVendorMotivation,
   generateNarrative,
 } from '@/lib/llm/vendor-motivation';
+import { clientKey, rateLimit } from '@/lib/ratelimit';
 import type { FullValuationResult } from '@/lib/types';
 
 export const runtime = 'nodejs';
@@ -25,6 +26,17 @@ const RequestSchema = z.object({
 });
 
 export async function POST(req: Request) {
+  const rl = rateLimit(`cma:${clientKey(req)}`);
+  if (!rl.allowed) {
+    return NextResponse.json(
+      { error: 'Too many requests. Please wait a minute and try again.' },
+      {
+        status: 429,
+        headers: rateLimitHeaders(rl),
+      },
+    );
+  }
+
   let body: unknown;
   try {
     body = await req.json();
@@ -100,10 +112,22 @@ export async function POST(req: Request) {
       actualDaysOnMarket,
     };
 
-    return NextResponse.json(payload);
+    return NextResponse.json(payload, { headers: rateLimitHeaders(rl) });
   } catch (err) {
     console.error('CMA route failed:', err);
     const message = err instanceof Error ? err.message : 'CMA generation failed.';
     return NextResponse.json({ error: message }, { status: 500 });
   }
+}
+
+function rateLimitHeaders(rl: {
+  limit: number;
+  remaining: number;
+  resetAt: number;
+}): Record<string, string> {
+  return {
+    'X-RateLimit-Limit': String(rl.limit),
+    'X-RateLimit-Remaining': String(rl.remaining),
+    'X-RateLimit-Reset': String(Math.ceil(rl.resetAt / 1000)),
+  };
 }
