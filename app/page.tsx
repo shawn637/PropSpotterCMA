@@ -39,21 +39,20 @@ export default function Home() {
     }
   }
 
-  async function handleDownloadPdf() {
-    if (view.kind !== 'result') return;
+  async function handleDownloadPdf(current: FullValuationResult) {
     setPdfBusy(true);
     try {
       const res = await fetch('/api/pdf', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(view.data),
+        body: JSON.stringify(current),
       });
       if (!res.ok) throw new Error(`PDF render failed (${res.status})`);
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = fileNameFor(view.data.subject.fullAddress);
+      a.download = fileNameFor(current.subject.fullAddress);
       document.body.appendChild(a);
       a.click();
       a.remove();
