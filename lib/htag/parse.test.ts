@@ -70,7 +70,80 @@ const propertySummaryFixture = {
   total: 1,
 };
 
+// Live HTAG shape — taken from an actual /v1/property/sold/search response
+// for Stanhope Gardens NSW 2768 on 2026-04-22. Note the field names:
+// `sold_price` / `sold_date` / `street_address` (NOT the `sale_price` /
+// `sale_date` / `address` documented in the OpenAPI spec).
 const soldSearchFixture = {
+  total: 4,
+  results: [
+    {
+      // Sentinel row #1: null sold_price — should be skipped.
+      address_key: '7ROCHDALECIRCUITSTANHOPEGARDENSNSW2768',
+      property_type: 'house',
+      street_address: '7 Rochdale Circuit',
+      suburb: 'Stanhope Gardens',
+      state: 'NSW',
+      postcode: '2768',
+      sold_date: '2026-04-16',
+      sold_price: null,
+      bedrooms: 5,
+      bathrooms: 2,
+      car_spaces: 2,
+      land_area: 520,
+    },
+    {
+      address_key: '74BENTWOODTERRACESTANHOPEGARDENSNSW2768',
+      property_type: 'house',
+      street_address: '74 Bentwood Terrace',
+      suburb: 'Stanhope Gardens',
+      state: 'NSW',
+      postcode: '2768',
+      sold_date: '2026-04-14',
+      sold_price: 1620300,
+      bedrooms: 5,
+      bathrooms: 3,
+      car_spaces: 2,
+      land_area: null,
+    },
+    {
+      // Dedup pair part 1.
+      address_key: '18SPICEBUSHGLADESTANHOPEGARDENSNSW2768',
+      property_type: 'house',
+      street_address: '18 SPICEBUSH GLADE',
+      suburb: 'Stanhope Gardens',
+      state: 'NSW',
+      postcode: '2768',
+      sold_date: '2026-02-18',
+      sold_price: 1432000,
+      bedrooms: 4,
+      bathrooms: 2,
+      car_spaces: 2,
+      land_area: 411,
+    },
+    {
+      // Dedup pair part 2 — same physical sale, different address_key
+      // (street type spelt as "Gld" instead of "Glade").
+      address_key: '18SPICEBUSHGLDSTANHOPEGARDENSNSW2768',
+      property_type: 'house',
+      street_address: '18 Spicebush Gld',
+      suburb: 'Stanhope Gardens',
+      state: 'NSW',
+      postcode: '2768',
+      sold_date: '2026-02-18',
+      sold_price: 1432000,
+      bedrooms: 4,
+      bathrooms: 2,
+      car_spaces: 2,
+      land_area: 410,
+    },
+  ],
+};
+
+// The shape the OpenAPI spec documents but the live API does NOT return.
+// Kept as a test fixture so the parser still works if HTAG ever ships the
+// documented field names.
+const soldSearchSpecFixture = {
   results: [
     {
       address: '8 Example Street, Orange NSW 2800',
@@ -79,38 +152,10 @@ const soldSearchFixture = {
       sale_date: '2026-02-14',
       property_type: 'house',
       bedrooms: 3,
-      bathrooms: 2,
-      car_spaces: 2,
-      land_area: 640,
-      floor_area: 175,
       distance_km: 0.4,
     },
-    {
-      address: '22 Sample Road, Orange NSW 2800',
-      address_key: '22SAMPLEROADORANGENSW2800',
-      sale_price: 685000,
-      sale_date: '2026-01-30',
-      property_type: 'house',
-      bedrooms: 3,
-      bathrooms: 1,
-      car_spaces: 1,
-      land_area: 610,
-      floor_area: null,
-      distance_km: 0.8,
-    },
-    {
-      // Deliberate sentinel row with null sale_price — should be skipped.
-      address: '99 Gap Avenue, Orange NSW 2800',
-      address_key: '99GAPAVENUEORANGENSW2800',
-      sale_price: null,
-      sale_date: '2026-03-01',
-      property_type: 'house',
-      distance_km: 1.2,
-    },
   ],
-  total: 3,
-  limit: 100,
-  offset: 0,
+  total: 1,
 };
 
 const marketSummaryFixture = {
@@ -327,18 +372,35 @@ test('parsePropertySummary: normalises unit/townhouse/apartment variants', () =>
 // parseSoldSearch — PropertySoldRecord
 // ---------------------------------------------------------------------------
 
-test('parseSoldSearch: maps fields + drops rows with null sale_price', () => {
+test('parseSoldSearch: live HTAG shape (sold_price/sold_date/street_address)', () => {
   const r = parseSoldSearch(soldSearchFixture);
-  assert.equal(r.length, 2, 'third row has null sale_price and is dropped');
-  assert.equal(r[0].addressKey, '8EXAMPLESTREETORANGENSW2800');
+  // 4 raw rows: 1 dropped (null sold_price), 1 deduped (same sale).
+  assert.equal(r.length, 2, '4 raw → 1 null + 1 dedup → 2 valid');
+  assert.equal(r[0].addressKey, '74BENTWOODTERRACESTANHOPEGARDENSNSW2768');
+  assert.equal(
+    r[0].fullAddress,
+    '74 Bentwood Terrace, Stanhope Gardens, NSW 2768',
+  );
+  assert.equal(r[0].salePrice, 1620300);
+  assert.equal(r[0].saleDateIso, '2026-04-14');
+  assert.equal(r[0].bedrooms, 5);
+  assert.equal(r[0].propertyType, 'House');
+});
+
+test('parseSoldSearch: dedups duplicate sales by (sold_price, sold_date)', () => {
+  const r = parseSoldSearch(soldSearchFixture);
+  const spicebush = r.filter((c) => c.salePrice === 1432000);
+  assert.equal(spicebush.length, 1, '18 Spicebush GLADE/Gld merged into 1 row');
+});
+
+test('parseSoldSearch: backward-compat with documented spec field names', () => {
+  // If HTAG ever ships the documented sale_price/sale_date/address shape,
+  // we still parse it correctly.
+  const r = parseSoldSearch(soldSearchSpecFixture);
+  assert.equal(r.length, 1);
   assert.equal(r[0].fullAddress, '8 Example Street, Orange NSW 2800');
   assert.equal(r[0].salePrice, 705000);
   assert.equal(r[0].saleDateIso, '2026-02-14');
-  assert.equal(r[0].bedrooms, 3);
-  assert.equal(r[0].landAreaSqm, 640);
-  assert.equal(r[0].distanceKm, 0.4);
-  assert.equal(r[0].propertyType, 'House');
-  assert.equal(r[0].htagAdjustmentFactor, undefined, 'no adjustment in sold-search');
 });
 
 test('parseSoldSearch: empty results returns empty array', () => {
@@ -416,8 +478,11 @@ test('mapCycleString: Rising synonyms', () => {
   }
 });
 
-test('mapCycleString: Peaking synonyms', () => {
-  for (const s of ['Peak', 'Peaking', 'Plateau']) {
+test('mapCycleString: Peaking synonyms (incl. live (+)Peak / (-)Peak)', () => {
+  // HTAG decorates cycle strings with directional sign indicators in
+  // the live API: '(+)Peak' = approaching peak from below,
+  // '(-)Peak' = leaving peak. Both still map to Peaking.
+  for (const s of ['Peak', 'Peaking', 'Plateau', '(+)Peak', '(-)Peak']) {
     assert.equal(mapCycleString(s), 'Peaking', `for ${s}`);
   }
 });

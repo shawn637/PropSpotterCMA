@@ -172,27 +172,42 @@ export function parsePropertySummary(
 
 /**
  * Parse PropertySoldSearchResponse rows into our Comparable shape.
- * Note HTAG does NOT return a per-comp adjustment_factor here — the
- * structural adjustment is a separate (paid, Restricted-tier) endpoint.
- * Our client leaves adjustment_factor undefined and falls back to the
- * heuristic similarity adjustment in lib/cma/compute.ts.
+ *
+ * Field-name reality check: HTAG's published OpenAPI spec calls the
+ * fields `sale_price`, `sale_date`, and `address`. The live API actually
+ * returns `sold_price`, `sold_date`, and `street_address` (verified
+ * against /v1/property/sold/search responses for Stanhope Gardens NSW
+ * 2768 on 2026-04-22). We accept both — live names first.
+ *
+ * Dedup: HTAG occasionally returns the same physical sale twice with
+ * different address_keys — typically a street-type spelling variant
+ * ("18 Spicebush GLADE" vs "18 Spicebush Gld"). Two genuinely distinct
+ * properties selling for the exact same dollar amount on the exact same
+ * day is statistically vanishingly rare, so we dedup by
+ * (sold_price, sold_date) and keep the first occurrence.
+ *
+ * HTAG does NOT return a per-comp adjustment_factor here — that's a
+ * separate (paid, Restricted-tier) endpoint. Comparables fall through
+ * to the heuristic similarity adjustment in lib/cma/compute.ts.
  */
 export function parseSoldSearch(
   response: unknown,
   endpoint = '/v1/property/sold/search',
 ): Comparable[] {
   const rows = resultArray(response, endpoint);
-  return rows.flatMap((row, idx) => {
+  const seen = new Set<string>();
+  return rows.flatMap((row) => {
     const addressKey = pickString(row, 'address_key');
-    const fullAddress = pickString(row, 'address');
-    const salePrice = pickNumber(row, 'sale_price');
-    const saleDate = pickString(row, 'sale_date');
+    const salePrice = pickNumber(row, 'sold_price', 'sale_price');
+    const saleDate = pickString(row, 'sold_date', 'sale_date');
+    const fullAddress =
+      buildSoldFullAddress(row) ?? pickString(row, 'address');
     if (!addressKey || !fullAddress || salePrice == null || !saleDate) {
-      // Skip sentinel/empty rows rather than failing the whole pipeline.
-      // The CMA math needs at least 3 good comparables — bad rows just
-      // reduce the sample size.
       return [];
     }
+    const dedupKey = `${salePrice}|${saleDate}`;
+    if (seen.has(dedupKey)) return [];
+    seen.add(dedupKey);
     return [
       {
         addressKey,
@@ -208,6 +223,27 @@ export function parseSoldSearch(
       } satisfies Comparable,
     ];
   });
+}
+
+function buildSoldFullAddress(
+  row: Record<string, unknown>,
+): string | undefined {
+  const street = pickString(row, 'street_address', 'address');
+  if (!street) return undefined;
+  const cleaned = street.trim().replace(/\s+/g, ' ');
+  const suburb = pickString(row, 'suburb');
+  const state = pickString(row, 'state');
+  const postcode = pickString(row, 'postcode');
+  const stateAndPost = [state, postcode].filter(Boolean).join(' ');
+  const tail = [suburb, stateAndPost].filter(Boolean).join(', ');
+  // Only append suburb/state/postcode if the street string doesn't
+  // already include them (some HTAG responses send a fully-formatted
+  // address in `address`, others send only the street part in
+  // `street_address`).
+  if (tail && !cleaned.toLowerCase().includes((suburb ?? '').toLowerCase())) {
+    return `${cleaned}, ${tail}`;
+  }
+  return cleaned;
 }
 
 /**
