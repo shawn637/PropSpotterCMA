@@ -5,7 +5,12 @@ import { clientKey, rateLimit } from '@/lib/ratelimit';
 import type { FullValuationResult } from '@/lib/types';
 
 export const runtime = 'nodejs';
-export const maxDuration = 30;
+// The expanded prompt (subject vision + up to 8 comps with full
+// visual profiles inline) is meaningfully heavier than the original
+// narrative call; the old 30 s budget was occasionally blowing past.
+// 120 s gives comfortable margin without committing to the 300 s Pro
+// cap — generateNarrative has its own 90 s Anthropic-side deadline.
+export const maxDuration = 120;
 
 /**
  * Regenerate the CMA narrative based on the client's CURRENT state

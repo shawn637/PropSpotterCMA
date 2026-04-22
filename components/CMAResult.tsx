@@ -521,18 +521,11 @@ export function CMAResult({
         );
       }
 
-      // Kick the narrative regeneration so the prose references the
-      // just-computed visual attributes. Only fire once per session —
-      // subsequent tweaks are a manual button. Swallow errors; the
-      // initial server narrative remains on screen if this fails.
-      if (!narrativeRegeneratedRef.current) {
-        narrativeRegeneratedRef.current = true;
-        // Defer by a tick so React has flushed setVisionMap and useMemo
-        // has recomputed `current` with the fresh attrs in place.
-        setTimeout(() => {
-          void regenerateNarrative();
-        }, 0);
-      }
+      // Narrative regeneration is triggered by a useEffect watching
+      // `visionMap` (see below). That path waits for React to flush
+      // the setVisionMap call and for useMemo to rebuild `current`
+      // with the fresh visual attrs; doing it here would fire against
+      // the stale pre-Vision `current` closure.
     } catch (err) {
       setVisionError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -591,6 +584,24 @@ export function CMAResult({
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /**
+   * Auto-regenerate the narrative once Vision data lands. Triggered
+   * by visionMap changes rather than inline in analyzeImagesDirect
+   * because we need React to have flushed setVisionMap AND useMemo to
+   * have rebuilt `current` with the fresh visual attrs before we POST
+   * the snapshot — doing it inline would send the pre-Vision `current`
+   * closure and the regenerated prose wouldn't cite any visual
+   * findings. Fires once per session; the manual Regenerate button
+   * handles subsequent edits.
+   */
+  useEffect(() => {
+    if (narrativeRegeneratedRef.current) return;
+    if (Object.keys(visionMap).length === 0) return;
+    narrativeRegeneratedRef.current = true;
+    void regenerateNarrative();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visionMap]);
 
   return (
     <div className="space-y-6">

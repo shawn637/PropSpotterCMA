@@ -254,12 +254,19 @@ ${compLines}
 
   try {
     const client = makeClient();
-    const response = await client.messages.create({
-      model: model(),
-      max_tokens: 1200,
-      system: BRAND_RULES,
-      messages: [{ role: 'user', content: prompt }],
-    });
+    // Per-call hard deadline so a single slow Anthropic response can
+    // fail fast rather than burning the /api/narrative route's
+    // function budget. 90 s is well above the ~15 s Sonnet 4.6
+    // typically takes for a 250-word response on this prompt.
+    const response = await client.messages.create(
+      {
+        model: model(),
+        max_tokens: 1200,
+        system: BRAND_RULES,
+        messages: [{ role: 'user', content: prompt }],
+      },
+      { timeout: 90_000 },
+    );
 
     const text = response.content
       .filter((b): b is Anthropic.TextBlock => b.type === 'text')
