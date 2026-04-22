@@ -4,6 +4,12 @@ import type {
   PropertyDetails,
 } from '@/lib/types';
 import { PROFILES, pickProfile, profileByLocPid } from '@/lib/htag/mock';
+import {
+  HtagParseError,
+  buildSubjectProperty,
+  parseStandardiseResult,
+  unwrapBatchResult,
+} from '@/lib/htag/parse';
 
 export function isMockMode(): boolean {
   return (process.env.MOCK_DATA ?? 'true').toLowerCase() !== 'false';
@@ -130,41 +136,50 @@ export async function getSubjectProperty(
     };
   }
 
-  // HTAG's standardise endpoint is a batch: the request takes an
-  // `addresses` array and the response is also array-shaped. We still
-  // only ever send one address at a time, so we unwrap results[0].
+  // HTAG's standardise endpoint is a batch: request takes an `addresses`
+  // array and the response is array/wrapped-array-shaped. Observed shape
+  // (2026-04-22): [{input_address, address_key, standardised_address, error}].
+  // Suburb/state/postcode/loc_pid are NOT on the standardise payload; they
+  // come from the property summary endpoint (or fall back to a parsed
+  // address string). See lib/htag/parse.ts + lib/htag/parse.test.ts.
   const standardisePath = '/v1/address/standardise';
   const standardiseResponse = await rawHtagFetch<Record<string, unknown>>(
     standardisePath,
     { method: 'POST', body: JSON.stringify({ addresses: [address] }) },
   );
-  const standardised = unwrapBatchResult(standardiseResponse, standardisePath);
-
-  const addressKey = requireString(standardised, 'address_key', standardisePath);
-  const fullAddress = requireString(standardised, 'formatted_address', standardisePath);
-  const suburb = requireString(standardised, 'suburb', standardisePath);
-  const state = requireString(standardised, 'state', standardisePath);
-  const postcode = requireString(standardised, 'postcode', standardisePath);
-  const locPid = requireString(standardised, 'loc_pid', standardisePath);
+  let standardised;
+  try {
+    standardised = parseStandardiseResult(
+      unwrapBatchResult(standardiseResponse, standardisePath),
+      standardisePath,
+    );
+  } catch (err) {
+    if (err instanceof HtagParseError) {
+      throw new HtagError(err.message, err.endpoint);
+    }
+    throw err;
+  }
 
   // TODO(htag-live): confirm property summary endpoint + field names.
-  const summaryPath = `/v1/property/${encodeURIComponent(addressKey)}/summary`;
-  const summary = await rawHtagFetch<Record<string, unknown>>(summaryPath);
+  const summaryPath = `/v1/property/${encodeURIComponent(standardised.addressKey)}/summary`;
+  const summaryResponseRaw = await rawHtagFetch<Record<string, unknown>>(summaryPath);
+  // Be lenient about whether summary is flat or batch-wrapped too.
+  const summary = Array.isArray(summaryResponseRaw)
+    ? unwrapBatchResult(summaryResponseRaw, summaryPath)
+    : summaryResponseRaw;
 
-  return {
-    addressKey,
-    fullAddress,
-    suburb,
-    state,
-    postcode,
-    locPid,
-    landAreaSqm: optionalNumber(summary, 'land_area_sqm'),
-    bedrooms: optionalNumber(summary, 'bedrooms'),
-    bathrooms: optionalNumber(summary, 'bathrooms'),
-    carSpaces: optionalNumber(summary, 'car_spaces'),
-    yearBuilt: optionalNumber(summary, 'year_built'),
-    propertyType: normalisePropertyType(optionalString(summary, 'property_type')),
-  };
+  try {
+    return buildSubjectProperty({
+      standardise: standardised,
+      summary,
+      endpoint: summaryPath,
+    });
+  } catch (err) {
+    if (err instanceof HtagParseError) {
+      throw new HtagError(err.message, err.endpoint);
+    }
+    throw err;
+  }
 }
 
 export async function getComparables(
@@ -285,52 +300,6 @@ function topLevelKeys(value: unknown): string[] {
     return Object.keys(value).slice(0, 20);
   }
   return [];
-}
-
-/**
- * HTAG's batch-shaped endpoints (e.g. standardise) return either a bare
- * array or an object wrapping an array under `results`/`data`/`addresses`.
- * We send a single-element request every time, so unwrap to the first
- * element. If no array wrapping is found we return the raw object, so
- * a flat single-result response still works.
- */
-function unwrapBatchResult(
-  response: unknown,
-  endpoint: string,
-): Record<string, unknown> {
-  if (Array.isArray(response)) {
-    if (response.length === 0) {
-      throw new HtagError(
-        `HTAG ${endpoint} returned an empty array.`,
-        endpoint,
-      );
-    }
-    const first = response[0];
-    if (typeof first === 'object' && first !== null) {
-      return first as Record<string, unknown>;
-    }
-    throw new HtagError(
-      `HTAG ${endpoint} array element is not an object.`,
-      endpoint,
-    );
-  }
-  if (typeof response === 'object' && response !== null) {
-    const obj = response as Record<string, unknown>;
-    for (const key of ['results', 'data', 'addresses']) {
-      const inner = obj[key];
-      if (Array.isArray(inner) && inner.length > 0) {
-        const first = inner[0];
-        if (typeof first === 'object' && first !== null) {
-          return first as Record<string, unknown>;
-        }
-      }
-    }
-    return obj;
-  }
-  throw new HtagError(
-    `HTAG ${endpoint} response is not an object or array.`,
-    endpoint,
-  );
 }
 
 function requireString(
