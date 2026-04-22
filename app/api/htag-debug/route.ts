@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { z } from 'zod';
 
 import { HtagError, isMockMode, rawHtagFetch } from '@/lib/htag/client';
+import { firstResult } from '@/lib/htag/parse';
 import { clientKey, rateLimit } from '@/lib/ratelimit';
 
 export const runtime = 'nodejs';
@@ -18,19 +19,21 @@ export const maxDuration = 30;
  * Usage:
  *   curl -u any:$APP_PASSWORD -X POST https://<deploy>/api/htag-debug \
  *     -H 'Content-Type: application/json' \
- *     -d '{"address":"42 Example St, Baulkham Hills NSW 2153","locPid":"NSW231"}'
+ *     -d '{"address":"413 Anson Street, Orange NSW 2800"}'
  *
  * The response is a sequence of stages. Each stage records the endpoint
- * it hit, the status code, elapsed time, top-level response keys, and
- * (on success) the full raw JSON body so you can map field names to the
- * interfaces in lib/types.ts.
+ * it hit, the HTTP method, status, elapsed time, top-level response
+ * keys, and (on success) the full raw JSON body so you can map field
+ * names to the parsers in lib/htag/parse.ts.
  */
 const RequestSchema = z.object({
   address: z.string().min(4).max(300),
-  // Optional: if you already have a loc_pid for the suburb, we'll also
-  // probe the market endpoints. Without it, market stages are skipped
-  // because they key off loc_pid.
+  // Optional: if you already have a loc_pid, skip geocode and jump
+  // straight to the market endpoints for that suburb.
   locPid: z.string().min(1).max(64).optional(),
+  propertyType: z
+    .enum(['house', 'unit', 'townhouse', 'land', 'rural'])
+    .default('house'),
 });
 
 interface Stage {
@@ -48,10 +51,7 @@ interface Stage {
 export async function POST(req: Request) {
   const rl = rateLimit(`htag-debug:${clientKey(req)}`);
   if (!rl.allowed) {
-    return NextResponse.json(
-      { error: 'Too many requests.' },
-      { status: 429 },
-    );
+    return NextResponse.json({ error: 'Too many requests.' }, { status: 429 });
   }
 
   if (isMockMode()) {
@@ -78,32 +78,24 @@ export async function POST(req: Request) {
   let addressKey: string | undefined;
   let derivedLocPid: string | undefined = parsed.locPid;
 
-  // Stage 1: standardise. HTAG expects a batch request (addresses array)
-  // and returns array-shaped results. Flatten to the first result for
-  // downstream key extraction.
-  const standardised = await runStage(
-    stages,
-    'standardise',
-    '/v1/address/standardise',
-    'POST',
-    JSON.stringify({ addresses: [parsed.address] }),
-  );
-  const flat = flattenFirstResult(standardised);
-  if (flat) {
-    if (typeof flat.address_key === 'string') addressKey = flat.address_key;
-    if (!derivedLocPid && typeof flat.loc_pid === 'string') {
-      derivedLocPid = flat.loc_pid;
+  // Stage 1: /v1/address/geocode — canonical identity + loc_pid.
+  const geocodePath = `/v1/address/geocode?address=${encodeURIComponent(parsed.address)}`;
+  const geocode = await runStage(stages, 'geocode', geocodePath, 'GET');
+  try {
+    const row = firstResult(geocode, geocodePath);
+    if (typeof row.address_key === 'string') addressKey = row.address_key;
+    if (!derivedLocPid && typeof row.loc_pid === 'string') {
+      derivedLocPid = row.loc_pid;
     }
+  } catch {
+    /* already logged as a failed stage */
   }
 
-  // Stage 2: property summary (only if standardise gave us an address key)
+  // Stage 2: /v1/property/summary — physical attributes (optional, may
+  // 404 even for a valid address_key).
   if (addressKey) {
-    await runStage(
-      stages,
-      'property-summary',
-      `/v1/property/${encodeURIComponent(addressKey)}/summary`,
-      'GET',
-    );
+    const summaryPath = `/v1/property/summary?address_key=${encodeURIComponent(addressKey)}`;
+    await runStage(stages, 'property-summary', summaryPath, 'GET');
   } else {
     stages.push({
       name: 'property-summary',
@@ -111,36 +103,43 @@ export async function POST(req: Request) {
       method: 'GET',
       ok: false,
       elapsedMs: 0,
-      error: 'No address_key found in standardise response.',
+      error: 'No address_key from geocode.',
     });
   }
 
-  // Stage 3: sold search (keyed off address_key + loc_pid)
+  // Stage 3: /v1/property/sold/search — recent comparable sales.
   if (addressKey) {
+    const sixMonthsAgo = new Date();
+    sixMonthsAgo.setUTCMonth(sixMonthsAgo.getUTCMonth() - 6);
+    const params = new URLSearchParams({
+      address_key: addressKey,
+      proximity: 'sameSuburb',
+      propertyType: parsed.propertyType,
+      saleFromDate: sixMonthsAgo.toISOString().slice(0, 10),
+      limit: '12',
+    });
     await runStage(
       stages,
       'sold-search',
-      '/v1/property/sold/search',
-      'POST',
-      JSON.stringify({
-        address_key: addressKey,
-        loc_pid: derivedLocPid,
-        radius_km: 2,
-        months_back: 6,
-        property_type: 'House',
-        limit: 12,
-      }),
+      `/v1/property/sold/search?${params.toString()}`,
+      'GET',
     );
   }
 
-  // Stages 4–7: market endpoints (only if we have a loc_pid)
+  // Stages 4–7: the four /v1/markets/* endpoints, all keyed off
+  // level=suburb + area_id=<loc_pid>.
   if (derivedLocPid) {
-    const q = `?loc_pid=${encodeURIComponent(derivedLocPid)}`;
+    const params = new URLSearchParams({
+      level: 'suburb',
+      area_id: derivedLocPid,
+      property_type: parsed.propertyType,
+    });
+    const q = `?${params.toString()}`;
     await Promise.all([
-      runStage(stages, 'market-growth', `/v1/markets/growth/annualised${q}`, 'GET'),
+      runStage(stages, 'market-summary', `/v1/markets/summary${q}`, 'GET'),
+      runStage(stages, 'market-growth-annualised', `/v1/markets/growth/annualised${q}`, 'GET'),
       runStage(stages, 'market-cycle', `/v1/markets/cycle${q}`, 'GET'),
       runStage(stages, 'market-demand', `/v1/markets/demand${q}`, 'GET'),
-      runStage(stages, 'market-summary', `/v1/markets/summary${q}`, 'GET'),
     ]);
   } else {
     stages.push({
@@ -149,7 +148,7 @@ export async function POST(req: Request) {
       method: 'GET',
       ok: false,
       elapsedMs: 0,
-      error: 'No loc_pid supplied and none returned by standardise.',
+      error: 'No loc_pid supplied and none returned by geocode.',
     });
   }
 
@@ -201,32 +200,4 @@ async function runStage(
     stages.push(stage);
     return null;
   }
-}
-
-/**
- * Batch endpoints return either a bare array or an object wrapping an
- * array. Returns the first element as a flat object, or null if the
- * response can't be flattened — the stage record already shows the raw
- * body so you can see the true shape anyway.
- */
-function flattenFirstResult(response: unknown): Record<string, unknown> | null {
-  if (Array.isArray(response)) {
-    return typeof response[0] === 'object' && response[0] !== null
-      ? (response[0] as Record<string, unknown>)
-      : null;
-  }
-  if (typeof response === 'object' && response !== null) {
-    const obj = response as Record<string, unknown>;
-    for (const key of ['results', 'data', 'addresses']) {
-      const inner = obj[key];
-      if (Array.isArray(inner) && inner.length > 0) {
-        const first = inner[0];
-        if (typeof first === 'object' && first !== null) {
-          return first as Record<string, unknown>;
-        }
-      }
-    }
-    return obj;
-  }
-  return null;
 }

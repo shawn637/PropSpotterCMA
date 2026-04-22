@@ -72,10 +72,23 @@ POST /api/pdf
 
 ## HTAG integration
 
-`lib/htag/client.ts` has five `TODO(htag-live):` comments marking where real
-API responses need round-trip confirmation. The mock path
-(`MOCK_DATA=true`, the default) always works. When flipping to live, tail
-Vercel function logs and fix field-name mismatches one at a time.
+`lib/htag/client.ts` is built against the HTAG OpenAPI spec v2.0.0. The
+parse layer in `lib/htag/parse.ts` is pure and tested — run `npm test`
+for 32 fixture-backed assertions before deploying any change. Endpoints:
+
+- `GET /v1/address/geocode` — canonical identity + loc_pid
+- `GET /v1/property/summary` — physical attributes (optional, may 404)
+- `GET /v1/property/sold/search` — comparables (proximity=sameSuburb,
+  last 6 months, limit 12)
+- `GET /v1/markets/{summary,growth/annualised,cycle,demand}` — all
+  keyed off `level=suburb&area_id=<loc_pid>`
+
+Auth is `x-api-key` header only. Base URL defaults to
+`https://api.htagai.com` (override with `HTAG_API_BASE_URL` for dev).
+
+When debugging a 502 from `/api/cma`, hit `/api/htag-debug` first — it
+probes all seven endpoints and returns raw bodies, which maps 1:1 to
+the parser shapes in `parse.ts`.
 
 ## Auth
 

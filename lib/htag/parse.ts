@@ -1,16 +1,30 @@
 /**
  * Pure parse helpers for HTAG responses. No I/O, no SDK calls — everything
- * in this file is deterministic given its input. This is what lib/htag/
- * client.test.ts exercises against known fixture shapes.
+ * in this file is deterministic given its input. Exercised by
+ * lib/htag/parse.test.ts against fixtures taken directly from the HTAG
+ * OpenAPI spec, so if the live API matches its documented shape the parse
+ * path is green before we ever deploy.
  *
- * We keep this separate from client.ts because:
- *  1. Running `node --test` on a file that imports Next.js / @react-pdf
- *     would drag in a huge dependency tree.
- *  2. The iteration story for Phase 3 is "HTAG returns a shape we didn't
- *     anticipate" -- that's a pure-data problem and belongs in pure code.
+ * The relevant HTAG endpoints we consume:
+ *   GET  /v1/address/geocode                      → AddressGeocodeResponse
+ *   GET  /v1/property/summary?address_key=…       → AddressPropertyResponse
+ *   GET  /v1/property/sold/search?…               → PropertySoldSearchResponse
+ *   GET  /v1/markets/summary?level=&area_id=…     → MarketSummaryResponse
+ *   GET  /v1/markets/growth/annualised?…          → MarketGrowthAnnualisedResponse
+ *   GET  /v1/markets/cycle?…                      → MarketCycleResponse
+ *   GET  /v1/markets/demand?…                     → MarketDemandResponse
+ *
+ * Every HTAG response wraps its payload as { results: [...], total: N };
+ * most of our endpoints only ever return one element, so the helpers
+ * unwrap to results[0] for us.
  */
 
-import type { PropertyDetails } from '@/lib/types';
+import type {
+  Comparable,
+  CycleStage,
+  MarketContext,
+  PropertyDetails,
+} from '@/lib/types';
 
 export class HtagParseError extends Error {
   constructor(message: string, readonly endpoint: string) {
@@ -19,56 +33,313 @@ export class HtagParseError extends Error {
   }
 }
 
-/**
- * HTAG batch endpoints return either a bare array, an object wrapping
- * an array under `results` / `data` / `addresses`, or a flat single
- * object. This normalises all three to a flat record.
- */
-export function unwrapBatchResult(
+export function firstResult(
   response: unknown,
   endpoint: string,
 ): Record<string, unknown> {
   if (Array.isArray(response)) {
     if (response.length === 0) {
+      throw new HtagParseError(`HTAG ${endpoint} returned an empty array.`, endpoint);
+    }
+    const first = response[0];
+    if (!isObject(first)) {
       throw new HtagParseError(
-        `HTAG ${endpoint} returned an empty array.`,
+        `HTAG ${endpoint} array element is not an object.`,
         endpoint,
       );
     }
-    const first = response[0];
-    if (typeof first === 'object' && first !== null) {
-      return first as Record<string, unknown>;
-    }
+    return first;
+  }
+  if (!isObject(response)) {
     throw new HtagParseError(
-      `HTAG ${endpoint} array element is not an object.`,
+      `HTAG ${endpoint} response is not an object.`,
       endpoint,
     );
   }
-  if (typeof response === 'object' && response !== null) {
-    const obj = response as Record<string, unknown>;
-    for (const key of ['results', 'data', 'addresses']) {
-      const inner = obj[key];
-      if (Array.isArray(inner) && inner.length > 0) {
-        const first = inner[0];
-        if (typeof first === 'object' && first !== null) {
-          return first as Record<string, unknown>;
-        }
-      }
+  const results = response.results;
+  if (Array.isArray(results)) {
+    if (results.length === 0) {
+      throw new HtagParseError(
+        `HTAG ${endpoint} returned { results: [] }.`,
+        endpoint,
+      );
     }
-    return obj;
+    const first = results[0];
+    if (!isObject(first)) {
+      throw new HtagParseError(
+        `HTAG ${endpoint} results[0] is not an object.`,
+        endpoint,
+      );
+    }
+    return first;
+  }
+  // Fall back to treating the response itself as the flat record — useful
+  // for the debug endpoint and for hypothetical non-wrapped shapes.
+  return response;
+}
+
+export function resultArray(
+  response: unknown,
+  endpoint: string,
+): Record<string, unknown>[] {
+  if (Array.isArray(response)) {
+    return response.filter(isObject) as Record<string, unknown>[];
+  }
+  if (isObject(response) && Array.isArray(response.results)) {
+    return (response.results as unknown[]).filter(isObject) as Record<
+      string,
+      unknown
+    >[];
   }
   throw new HtagParseError(
-    `HTAG ${endpoint} response is not an object or array.`,
+    `HTAG ${endpoint} response is not an array or { results: [...] }.`,
     endpoint,
   );
 }
 
 /**
- * Try a list of candidate key names; return the first one that has a
- * non-empty string value. Used so we can tolerate HTAG field-name
- * differences without hand-editing every time.
+ * Parse AddressGeocodeRecord into our PropertyDetails subject fields.
+ * We use this endpoint instead of /address/standardise because geocode
+ * returns loc_pid + locality_name + state + postcode in a single call
+ * (standardise returns the component address parts but NOT loc_pid).
  */
-export function pickString(
+export interface GeocodeParsed {
+  addressKey: string;
+  locPid: string;
+  suburb: string;
+  state: string;
+  postcode: string;
+  fullAddress: string;
+}
+
+export function parseGeocode(
+  response: unknown,
+  endpoint = '/v1/address/geocode',
+): GeocodeParsed {
+  const row = firstResult(response, endpoint);
+  const addressKey = requireString(row, 'address_key', endpoint);
+  const locPid = requireString(row, 'loc_pid', endpoint);
+  const locality = requireString(row, 'locality_name', endpoint);
+  const state = requireString(row, 'state', endpoint);
+  const postcode = requireString(row, 'postcode', endpoint);
+  const addressLabel = pickString(row, 'address_label');
+  const fullAddress =
+    addressLabel ?? buildCanonicalAddress(row, locality, state, postcode);
+  return {
+    addressKey,
+    locPid,
+    suburb: locality,
+    state,
+    postcode,
+    fullAddress,
+  };
+}
+
+/**
+ * Parse AddressPropertyRecord. All physical attribute fields are optional
+ * on the HTAG spec, so the subject is usable even if the summary endpoint
+ * 404s for a given address_key.
+ */
+export interface PropertySummaryParsed {
+  bedrooms?: number;
+  bathrooms?: number;
+  carSpaces?: number;
+  landAreaSqm?: number;
+  floorAreaSqm?: number;
+  yearBuilt?: number;
+  propertyType?: PropertyDetails['propertyType'];
+}
+
+export function parsePropertySummary(
+  response: unknown,
+  endpoint = '/v1/property/summary',
+): PropertySummaryParsed {
+  const row = firstResult(response, endpoint);
+  const buildDate = pickString(row, 'build_reno_date');
+  const yearFromBuildDate = buildDate
+    ? Number.parseInt(buildDate.slice(0, 4), 10)
+    : NaN;
+  return {
+    bedrooms: pickInteger(row, 'beds'),
+    bathrooms: pickInteger(row, 'baths'),
+    carSpaces: pickInteger(row, 'parking'),
+    landAreaSqm: pickNumber(row, 'lot_size'),
+    floorAreaSqm: pickNumber(row, 'floor_area'),
+    yearBuilt: Number.isFinite(yearFromBuildDate) ? yearFromBuildDate : undefined,
+    propertyType: normalisePropertyType(pickString(row, 'property_type')),
+  };
+}
+
+/**
+ * Parse PropertySoldSearchResponse rows into our Comparable shape.
+ * Note HTAG does NOT return a per-comp adjustment_factor here — the
+ * structural adjustment is a separate (paid, Restricted-tier) endpoint.
+ * Our client leaves adjustment_factor undefined and falls back to the
+ * heuristic similarity adjustment in lib/cma/compute.ts.
+ */
+export function parseSoldSearch(
+  response: unknown,
+  endpoint = '/v1/property/sold/search',
+): Comparable[] {
+  const rows = resultArray(response, endpoint);
+  return rows.flatMap((row, idx) => {
+    const addressKey = pickString(row, 'address_key');
+    const fullAddress = pickString(row, 'address');
+    const salePrice = pickNumber(row, 'sale_price');
+    const saleDate = pickString(row, 'sale_date');
+    if (!addressKey || !fullAddress || salePrice == null || !saleDate) {
+      // Skip sentinel/empty rows rather than failing the whole pipeline.
+      // The CMA math needs at least 3 good comparables — bad rows just
+      // reduce the sample size.
+      return [];
+    }
+    return [
+      {
+        addressKey,
+        fullAddress,
+        salePrice,
+        saleDateIso: saleDate,
+        landAreaSqm: pickNumber(row, 'land_area'),
+        bedrooms: pickInteger(row, 'bedrooms'),
+        bathrooms: pickInteger(row, 'bathrooms'),
+        carSpaces: pickInteger(row, 'car_spaces'),
+        distanceKm: pickNumber(row, 'distance_km'),
+        propertyType: normalisePropertyType(pickString(row, 'property_type')),
+      } satisfies Comparable,
+    ];
+  });
+}
+
+/**
+ * Parsed market context, populated one field at a time from the four
+ * market endpoints. Everything is optional up front; the client caller
+ * merges them and fills in sensible defaults for anything HTAG didn't
+ * return.
+ */
+export interface MarketContextParts {
+  typicalPrice?: number;
+  medianSalePrice?: number;
+  annualisedGrowth5y?: number;
+  cycleStage?: CycleStage;
+  cycleRaw?: string;
+  typicalDaysOnMarket?: number;
+}
+
+export function parseMarketSummary(
+  response: unknown,
+  endpoint = '/v1/markets/summary',
+): Pick<MarketContextParts, 'typicalPrice' | 'medianSalePrice'> {
+  const row = firstResult(response, endpoint);
+  return {
+    typicalPrice: pickNumber(row, 'typical_price'),
+    // HTAG spec doesn't name a separate median_sale_price field on this
+    // endpoint, but some deployments expose it. Optional either way.
+    medianSalePrice: pickNumber(row, 'median_sale_price'),
+  };
+}
+
+export function parseMarketGrowthAnnualised(
+  response: unknown,
+  endpoint = '/v1/markets/growth/annualised',
+): Pick<MarketContextParts, 'annualisedGrowth5y'> {
+  const row = firstResult(response, endpoint);
+  const raw = pickNumber(row, 'price_5y_growth_annualised');
+  if (raw == null) return { annualisedGrowth5y: undefined };
+  // HTAG may return either a decimal fraction (0.072) or a percentage
+  // (7.2). Anything with absolute value > 1 is treated as a percent and
+  // scaled down. Real growth rates are never > 100% p.a., so this is
+  // safe.
+  const annualised = Math.abs(raw) > 1 ? raw / 100 : raw;
+  return { annualisedGrowth5y: annualised };
+}
+
+export function parseMarketCycle(
+  response: unknown,
+  endpoint = '/v1/markets/cycle',
+): Pick<MarketContextParts, 'cycleStage' | 'cycleRaw'> {
+  const row = firstResult(response, endpoint);
+  const raw = pickString(row, 'growth_rate_cycle');
+  return { cycleStage: mapCycleString(raw), cycleRaw: raw };
+}
+
+export function parseMarketDemand(
+  response: unknown,
+  endpoint = '/v1/markets/demand',
+): Pick<MarketContextParts, 'typicalDaysOnMarket'> {
+  const row = firstResult(response, endpoint);
+  return { typicalDaysOnMarket: pickNumber(row, 'dom') };
+}
+
+/**
+ * Merge the four parsed market-endpoint parts into the MarketContext the
+ * rest of the app expects. Missing values get conservative defaults:
+ * - annualisedGrowth5y → 0.04 (4%, a cautious national baseline)
+ * - cycleStage        → 'Peaking' (0% cycle stretch — don't lean in)
+ * - typicalDaysOnMarket → 42 (generic Australian median)
+ *
+ * These are only used if HTAG actually returned null for that field;
+ * normally every market call succeeds and we use the live value.
+ */
+export function buildMarketContext(args: {
+  parts: MarketContextParts;
+  subject: PropertyDetails;
+  endpoint: string;
+}): MarketContext {
+  const { parts, subject } = args;
+  return {
+    locPid: subject.locPid,
+    suburb: subject.suburb,
+    state: subject.state,
+    annualisedGrowth5y: parts.annualisedGrowth5y ?? 0.04,
+    cycleStage: parts.cycleStage ?? 'Peaking',
+    typicalDaysOnMarket: parts.typicalDaysOnMarket ?? 42,
+    typicalPrice: parts.typicalPrice,
+    medianSalePrice: parts.medianSalePrice,
+  };
+}
+
+/**
+ * Map HTAG's growth_rate_cycle string to our internal CycleStage. HTAG
+ * doesn't enumerate the values in the spec — we've seen terminology
+ * variants in the wild, so match loosely. Unknown inputs fall back to
+ * 'Peaking' (0% cycle stretch — conservative).
+ */
+export function mapCycleString(raw: string | undefined): CycleStage | undefined {
+  if (!raw) return undefined;
+  const s = raw.toLowerCase();
+  if (/recov|trough|bottom/.test(s)) return 'Recovery';
+  if (/ris|expan|upswing|growth/.test(s)) return 'Rising';
+  if (/peak|plateau/.test(s)) return 'Peaking';
+  if (/corr|contr|declin|downturn|cooling/.test(s)) return 'Correction';
+  return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Utilities
+// ---------------------------------------------------------------------------
+
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+function requireString(
+  obj: Record<string, unknown>,
+  key: string,
+  endpoint: string,
+): string {
+  const v = obj[key];
+  if (typeof v !== 'string' || v.length === 0) {
+    throw new HtagParseError(
+      `HTAG ${endpoint} response missing required string field '${key}'. Got keys: [${Object.keys(
+        obj,
+      ).join(', ')}]`,
+      endpoint,
+    );
+  }
+  return v;
+}
+
+function pickString(
   obj: Record<string, unknown>,
   ...keys: string[]
 ): string | undefined {
@@ -79,7 +350,7 @@ export function pickString(
   return undefined;
 }
 
-export function pickNumber(
+function pickNumber(
   obj: Record<string, unknown>,
   ...keys: string[]
 ): number | undefined {
@@ -90,166 +361,12 @@ export function pickNumber(
   return undefined;
 }
 
-/**
- * Parse an Australian property address in canonical form
- *   "<street>, <suburb>, <STATE> <4-digit postcode>"
- * into the suburb/state/postcode components. Returns undefineds if the
- * pattern doesn't match — caller should fall back to other sources.
- */
-export function parseAustralianAddress(addr: string | undefined): {
-  suburb?: string;
-  state?: string;
-  postcode?: string;
-} {
-  if (!addr) return {};
-  // Match the tail: ", suburb, STATE postcode" allowing trailing whitespace.
-  const m = addr.match(
-    /,\s*([^,]+?)\s*,\s*(ACT|NSW|NT|QLD|SA|TAS|VIC|WA)\s+(\d{4})\s*$/i,
-  );
-  if (!m) return {};
-  return {
-    suburb: m[1].trim(),
-    state: m[2].toUpperCase(),
-    postcode: m[3],
-  };
-}
-
-const STANDARDISED_ADDRESS_KEYS = [
-  'standardised_address',
-  'standardized_address',
-  'formatted_address',
-];
-const ADDRESS_KEY_KEYS = ['address_key', 'addressKey', 'address_id'];
-const LOC_PID_KEYS = [
-  'loc_pid',
-  'locPid',
-  'locality_pid',
-  'locality_id',
-  'loc_id',
-  'suburb_pid',
-];
-const SUBURB_KEYS = ['suburb', 'locality', 'suburb_name', 'localityName'];
-const STATE_KEYS = ['state', 'state_code', 'stateCode'];
-const POSTCODE_KEYS = ['postcode', 'postal_code', 'postalCode'];
-const PROPERTY_TYPE_KEYS = ['property_type', 'propertyType', 'dwelling_type'];
-
-/**
- * Parse the flattened standardise response into the fields we care about.
- * Throws HtagParseError (with endpoint context) if the essentials are
- * missing. suburb/state/postcode/locPid may all be absent at this stage;
- * callers should merge the summary response in afterwards.
- */
-export interface StandardiseParsed {
-  addressKey: string;
-  fullAddress: string;
-  suburb?: string;
-  state?: string;
-  postcode?: string;
-  locPid?: string;
-  error?: string;
-}
-
-export function parseStandardiseResult(
-  raw: Record<string, unknown>,
-  endpoint = '/v1/address/standardise',
-): StandardiseParsed {
-  const errVal = raw.error;
-  const error =
-    typeof errVal === 'string' && errVal.length > 0 ? errVal : undefined;
-  if (error) {
-    throw new HtagParseError(
-      `HTAG ${endpoint} returned error for address: ${error}`,
-      endpoint,
-    );
-  }
-
-  const addressKey = pickString(raw, ...ADDRESS_KEY_KEYS);
-  if (!addressKey) {
-    throw new HtagParseError(
-      `HTAG ${endpoint} missing address_key. Got keys: [${Object.keys(raw).join(', ')}]`,
-      endpoint,
-    );
-  }
-
-  const fullAddress =
-    pickString(raw, ...STANDARDISED_ADDRESS_KEYS, 'input_address') ?? '';
-  if (!fullAddress) {
-    throw new HtagParseError(
-      `HTAG ${endpoint} missing a standardised address string. Got keys: [${Object.keys(raw).join(', ')}]`,
-      endpoint,
-    );
-  }
-
-  // Top-level fields if HTAG ever includes them; otherwise null and we
-  // let the caller try the summary response + parsed address string.
-  const suburb = pickString(raw, ...SUBURB_KEYS);
-  const state = pickString(raw, ...STATE_KEYS);
-  const postcode = pickString(raw, ...POSTCODE_KEYS);
-  const locPid = pickString(raw, ...LOC_PID_KEYS);
-
-  return { addressKey, fullAddress, suburb, state, postcode, locPid };
-}
-
-/**
- * Merge three sources of suburb/state/postcode/locPid, preferring
- * structured fields (standardise response or summary response) over a
- * parsed address string. Returns a fully-populated PropertyDetails or
- * throws if the essentials can't be resolved.
- */
-export function buildSubjectProperty(args: {
-  standardise: StandardiseParsed;
-  summary: Record<string, unknown>;
-  endpoint: string;
-}): PropertyDetails {
-  const { standardise, summary, endpoint } = args;
-  const parsedFromAddress = parseAustralianAddress(standardise.fullAddress);
-
-  const suburb =
-    standardise.suburb ??
-    pickString(summary, ...SUBURB_KEYS) ??
-    parsedFromAddress.suburb;
-  const state =
-    standardise.state ??
-    pickString(summary, ...STATE_KEYS) ??
-    parsedFromAddress.state;
-  const postcode =
-    standardise.postcode ??
-    pickString(summary, ...POSTCODE_KEYS) ??
-    parsedFromAddress.postcode;
-  const locPid =
-    standardise.locPid ?? pickString(summary, ...LOC_PID_KEYS);
-
-  const missing: string[] = [];
-  if (!suburb) missing.push('suburb');
-  if (!state) missing.push('state');
-  if (!postcode) missing.push('postcode');
-  if (!locPid) missing.push('locPid');
-  if (missing.length > 0) {
-    throw new HtagParseError(
-      `Unable to resolve ${missing.join(
-        ', ',
-      )} from standardise + summary responses. ` +
-        `Standardise keys: [${Object.keys(standardise).join(', ')}]. ` +
-        `Summary keys: [${Object.keys(summary).join(', ')}]. ` +
-        `Parsed address gave: ${JSON.stringify(parsedFromAddress)}.`,
-      endpoint,
-    );
-  }
-
-  return {
-    addressKey: standardise.addressKey,
-    fullAddress: standardise.fullAddress,
-    suburb: suburb!,
-    state: state!,
-    postcode: postcode!,
-    locPid: locPid!,
-    landAreaSqm: pickNumber(summary, 'land_area_sqm', 'landAreaSqm', 'land_size'),
-    bedrooms: pickNumber(summary, 'bedrooms', 'beds', 'bed'),
-    bathrooms: pickNumber(summary, 'bathrooms', 'baths', 'bath'),
-    carSpaces: pickNumber(summary, 'car_spaces', 'carSpaces', 'parking'),
-    yearBuilt: pickNumber(summary, 'year_built', 'yearBuilt', 'built_year'),
-    propertyType: normalisePropertyType(pickString(summary, ...PROPERTY_TYPE_KEYS)),
-  };
+function pickInteger(
+  obj: Record<string, unknown>,
+  ...keys: string[]
+): number | undefined {
+  const n = pickNumber(obj, ...keys);
+  return n != null ? Math.round(n) : undefined;
 }
 
 function normalisePropertyType(
@@ -257,8 +374,24 @@ function normalisePropertyType(
 ): PropertyDetails['propertyType'] {
   if (!raw) return undefined;
   const s = raw.toLowerCase();
-  if (s.includes('house')) return 'House';
+  // Order matters: "townhouse" contains "house", so town/semi must be
+  // matched first.
+  if (s.includes('town') || s.includes('semi')) return 'Townhouse';
   if (s.includes('unit') || s.includes('apartment')) return 'Unit';
-  if (s.includes('town')) return 'Townhouse';
+  if (s.includes('house')) return 'House';
   return 'Other';
+}
+
+function buildCanonicalAddress(
+  row: Record<string, unknown>,
+  locality: string,
+  state: string,
+  postcode: string,
+): string {
+  const num = pickString(row, 'number_first', 'number_last');
+  const streetName = pickString(row, 'street_name');
+  const streetType = pickString(row, 'street_type');
+  const street = [streetName, streetType].filter(Boolean).join(' ');
+  const head = [num, street].filter(Boolean).join(' ');
+  return [head, locality, `${state} ${postcode}`].filter(Boolean).join(', ');
 }

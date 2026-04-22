@@ -6,9 +6,14 @@ import type {
 import { PROFILES, pickProfile, profileByLocPid } from '@/lib/htag/mock';
 import {
   HtagParseError,
-  buildSubjectProperty,
-  parseStandardiseResult,
-  unwrapBatchResult,
+  buildMarketContext,
+  parseGeocode,
+  parseMarketCycle,
+  parseMarketDemand,
+  parseMarketGrowthAnnualised,
+  parseMarketSummary,
+  parsePropertySummary,
+  parseSoldSearch,
 } from '@/lib/htag/parse';
 
 export function isMockMode(): boolean {
@@ -27,7 +32,9 @@ export class HtagError extends Error {
 }
 
 function baseUrl(): string {
-  return process.env.HTAG_API_BASE_URL ?? 'https://api.prod.htagai.com';
+  // HTAG production base per the official OpenAPI spec. The old default
+  // was a guess (api.prod.htagai.com) that happened to resolve.
+  return process.env.HTAG_API_BASE_URL ?? 'https://api.htagai.com';
 }
 
 function timeoutMillis(): number {
@@ -45,21 +52,18 @@ function authHeaders(): Record<string, string> {
       '(config)',
     );
   }
-  // TODO(htag-live): HTAG's docs describe one auth header but we send both
-  // variants here until the live API confirms which one is correct. Remove
-  // the unused header once verified.
+  // HTAG spec: ApiKeyAuth via x-api-key header only. No bearer token.
   return {
-    'X-API-Key': key,
-    Authorization: `Bearer ${key}`,
-    'Content-Type': 'application/json',
+    'x-api-key': key,
     Accept: 'application/json',
   };
 }
 
 /**
- * Low-level HTAG fetch: auth headers, error surfacing with endpoint
- * context, and a structured log line on every call when live. Exported so
- * the debug route can hit endpoints without the normalization layer.
+ * Low-level HTAG fetch: auth headers, abort-controller timeout, clear
+ * error surfacing with endpoint context, and a structured log line on
+ * every call. Exported so the debug route can hit endpoints without the
+ * parse layer.
  */
 export async function rawHtagFetch<T = unknown>(
   path: string,
@@ -72,11 +76,16 @@ export async function rawHtagFetch<T = unknown>(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
+  const extraHeaders: Record<string, string> = {};
+  if (method !== 'GET' && init.body) {
+    extraHeaders['Content-Type'] = 'application/json';
+  }
+
   let res: Response;
   try {
     res = await fetch(url, {
       ...init,
-      headers: { ...authHeaders(), ...(init.headers ?? {}) },
+      headers: { ...authHeaders(), ...extraHeaders, ...(init.headers ?? {}) },
       cache: 'no-store',
       signal: controller.signal,
     });
@@ -125,6 +134,18 @@ export async function rawHtagFetch<T = unknown>(
   return json;
 }
 
+/**
+ * Resolve address identity + physical attributes.
+ *
+ * HTAG splits this into two calls:
+ *   GET /v1/address/geocode?address=…         → canonical identity + loc_pid
+ *   GET /v1/property/summary?address_key=…    → physical attributes (optional)
+ *
+ * If the property summary 404s (not every HTAG address has attributes),
+ * we still return a usable PropertyDetails from geocode alone; the CMA
+ * math falls back to heuristic similarity adjustments without bedrooms
+ * / land size.
+ */
 export async function getSubjectProperty(
   address: string,
 ): Promise<PropertyDetails> {
@@ -136,50 +157,43 @@ export async function getSubjectProperty(
     };
   }
 
-  // HTAG's standardise endpoint is a batch: request takes an `addresses`
-  // array and the response is array/wrapped-array-shaped. Observed shape
-  // (2026-04-22): [{input_address, address_key, standardised_address, error}].
-  // Suburb/state/postcode/loc_pid are NOT on the standardise payload; they
-  // come from the property summary endpoint (or fall back to a parsed
-  // address string). See lib/htag/parse.ts + lib/htag/parse.test.ts.
-  const standardisePath = '/v1/address/standardise';
-  const standardiseResponse = await rawHtagFetch<Record<string, unknown>>(
-    standardisePath,
-    { method: 'POST', body: JSON.stringify({ addresses: [address] }) },
+  const geocodePath = `/v1/address/geocode?address=${encodeURIComponent(address)}`;
+  const geocodeResponse = await rawHtagFetch<unknown>(geocodePath);
+  const geocode = rewrapParseError(() =>
+    parseGeocode(geocodeResponse, geocodePath),
   );
-  let standardised;
+
+  const summaryPath = `/v1/property/summary?address_key=${encodeURIComponent(geocode.addressKey)}`;
+  let summary;
   try {
-    standardised = parseStandardiseResult(
-      unwrapBatchResult(standardiseResponse, standardisePath),
-      standardisePath,
-    );
+    const summaryResponse = await rawHtagFetch<unknown>(summaryPath);
+    summary = parsePropertySummary(summaryResponse, summaryPath);
   } catch (err) {
-    if (err instanceof HtagParseError) {
+    // 404 is acceptable: HTAG has the address but no attribute record.
+    // Anything else (500, parse error, etc.) should still surface.
+    if (err instanceof HtagError && err.status === 404) {
+      summary = {};
+    } else if (err instanceof HtagParseError) {
       throw new HtagError(err.message, err.endpoint);
+    } else {
+      throw err;
     }
-    throw err;
   }
 
-  // TODO(htag-live): confirm property summary endpoint + field names.
-  const summaryPath = `/v1/property/${encodeURIComponent(standardised.addressKey)}/summary`;
-  const summaryResponseRaw = await rawHtagFetch<Record<string, unknown>>(summaryPath);
-  // Be lenient about whether summary is flat or batch-wrapped too.
-  const summary = Array.isArray(summaryResponseRaw)
-    ? unwrapBatchResult(summaryResponseRaw, summaryPath)
-    : summaryResponseRaw;
-
-  try {
-    return buildSubjectProperty({
-      standardise: standardised,
-      summary,
-      endpoint: summaryPath,
-    });
-  } catch (err) {
-    if (err instanceof HtagParseError) {
-      throw new HtagError(err.message, err.endpoint);
-    }
-    throw err;
-  }
+  return {
+    addressKey: geocode.addressKey,
+    fullAddress: geocode.fullAddress,
+    suburb: geocode.suburb,
+    state: geocode.state,
+    postcode: geocode.postcode,
+    locPid: geocode.locPid,
+    bedrooms: summary.bedrooms,
+    bathrooms: summary.bathrooms,
+    carSpaces: summary.carSpaces,
+    landAreaSqm: summary.landAreaSqm,
+    yearBuilt: summary.yearBuilt,
+    propertyType: summary.propertyType,
+  };
 }
 
 export async function getComparables(
@@ -189,55 +203,23 @@ export async function getComparables(
     return (profileByLocPid(subject.locPid) ?? PROFILES.baulkham).comparables;
   }
 
-  // TODO(htag-live): confirm the sold-search endpoint path, request body
-  // shape (radius / months / property_type), and results field name.
-  const path = '/v1/property/sold/search';
-  const body = {
+  // GET /v1/property/sold/search with query params. Restrict to the
+  // subject's suburb (proximity=sameSuburb) rather than radius-only so
+  // we don't pull sales from a neighbouring locality with a different
+  // market profile. saleFromDate is 6 months back.
+  const propertyType = (subject.propertyType ?? 'house').toLowerCase();
+  const sixMonthsAgo = new Date();
+  sixMonthsAgo.setUTCMonth(sixMonthsAgo.getUTCMonth() - 6);
+  const params = new URLSearchParams({
     address_key: subject.addressKey,
-    loc_pid: subject.locPid,
-    radius_km: 2,
-    months_back: 6,
-    property_type: subject.propertyType ?? 'House',
-    limit: 12,
-  };
-
-  const response = await rawHtagFetch<Record<string, unknown>>(path, {
-    method: 'POST',
-    body: JSON.stringify(body),
+    proximity: 'sameSuburb',
+    propertyType,
+    saleFromDate: sixMonthsAgo.toISOString().slice(0, 10),
+    limit: '12',
   });
-
-  const results = response.results;
-  if (!Array.isArray(results)) {
-    throw new HtagError(
-      `HTAG ${path} response missing 'results' array. Got keys: [${topLevelKeys(
-        response,
-      ).join(', ')}]`,
-      path,
-    );
-  }
-
-  return results.map((raw, idx) => {
-    if (typeof raw !== 'object' || raw === null) {
-      throw new HtagError(
-        `HTAG ${path} results[${idx}] is not an object.`,
-        path,
-      );
-    }
-    const r = raw as Record<string, unknown>;
-    return {
-      addressKey: requireString(r, 'address_key', `${path} results[${idx}]`),
-      fullAddress: requireString(r, 'formatted_address', `${path} results[${idx}]`),
-      salePrice: requireNumber(r, 'sale_price', `${path} results[${idx}]`),
-      saleDateIso: requireString(r, 'sale_date', `${path} results[${idx}]`),
-      landAreaSqm: optionalNumber(r, 'land_area_sqm'),
-      bedrooms: optionalNumber(r, 'bedrooms'),
-      bathrooms: optionalNumber(r, 'bathrooms'),
-      carSpaces: optionalNumber(r, 'car_spaces'),
-      distanceKm: optionalNumber(r, 'distance_km'),
-      htagAdjustmentFactor: optionalNumber(r, 'adjustment_factor'),
-      propertyType: normalisePropertyType(optionalString(r, 'property_type')),
-    };
-  });
+  const path = `/v1/property/sold/search?${params.toString()}`;
+  const response = await rawHtagFetch<unknown>(path);
+  return rewrapParseError(() => parseSoldSearch(response, path));
 }
 
 export async function getMarketContext(
@@ -247,33 +229,50 @@ export async function getMarketContext(
     return (profileByLocPid(subject.locPid) ?? PROFILES.baulkham).market;
   }
 
-  // TODO(htag-live): confirm whether the market endpoints accept loc_pid as
-  // a query param or a body field, and confirm response field names. Calls
-  // are run in parallel; each expected to return the single field noted.
-  const locPid = subject.locPid;
-  const query = `?loc_pid=${encodeURIComponent(locPid)}`;
-  const growthPath = `/v1/markets/growth/annualised${query}`;
-  const cyclePath = `/v1/markets/cycle${query}`;
-  const demandPath = `/v1/markets/demand${query}`;
-  const summaryPath = `/v1/markets/summary${query}`;
+  // All four market endpoints require level + area_id (as an array,
+  // though we only ever ask for one). We slice by property_type=house
+  // to stay consistent with the subject default; unit/townhouse subjects
+  // will need a separate pass if we ever wire them up.
+  const params = new URLSearchParams({
+    level: 'suburb',
+    area_id: subject.locPid,
+    property_type: (subject.propertyType ?? 'house').toLowerCase(),
+  });
+  const summaryPath = `/v1/markets/summary?${params.toString()}`;
+  const growthPath = `/v1/markets/growth/annualised?${params.toString()}`;
+  const cyclePath = `/v1/markets/cycle?${params.toString()}`;
+  const demandPath = `/v1/markets/demand?${params.toString()}`;
 
-  const [growth, cycle, demand, summary] = await Promise.all([
-    rawHtagFetch<Record<string, unknown>>(growthPath),
-    rawHtagFetch<Record<string, unknown>>(cyclePath),
-    rawHtagFetch<Record<string, unknown>>(demandPath),
-    rawHtagFetch<Record<string, unknown>>(summaryPath),
+  const [summary, growth, cycle, demand] = await Promise.all([
+    rawHtagFetch<unknown>(summaryPath),
+    rawHtagFetch<unknown>(growthPath),
+    rawHtagFetch<unknown>(cyclePath),
+    rawHtagFetch<unknown>(demandPath),
   ]);
 
-  return {
-    locPid,
-    suburb: subject.suburb,
-    state: subject.state,
-    annualisedGrowth5y: requireNumber(growth, 'annualised_5y', growthPath),
-    cycleStage: normaliseCycleStage(requireString(cycle, 'phase', cyclePath)),
-    typicalDaysOnMarket: requireNumber(demand, 'days_on_market', demandPath),
-    typicalPrice: optionalNumber(summary, 'typical_price'),
-    medianSalePrice: optionalNumber(summary, 'median_sale_price'),
-  };
+  return rewrapParseError(() =>
+    buildMarketContext({
+      subject,
+      parts: {
+        ...parseMarketSummary(summary, summaryPath),
+        ...parseMarketGrowthAnnualised(growth, growthPath),
+        ...parseMarketCycle(cycle, cyclePath),
+        ...parseMarketDemand(demand, demandPath),
+      },
+      endpoint: '/v1/markets/*',
+    }),
+  );
+}
+
+function rewrapParseError<T>(fn: () => T): T {
+  try {
+    return fn();
+  } catch (err) {
+    if (err instanceof HtagParseError) {
+      throw new HtagError(err.message, err.endpoint);
+    }
+    throw err;
+  }
 }
 
 function logHtag(info: {
@@ -284,15 +283,7 @@ function logHtag(info: {
   keys: string[];
   error?: string;
 }): void {
-  // Structured JSON line — easy to parse in Vercel log search.
-  // Doesn't log body content (PII/data sensitivity); only top-level keys
-  // so you can spot field-name mismatches.
-  console.log(
-    JSON.stringify({
-      tag: 'htag',
-      ...info,
-    }),
-  );
+  console.log(JSON.stringify({ tag: 'htag', ...info }));
 }
 
 function topLevelKeys(value: unknown): string[] {
@@ -300,74 +291,4 @@ function topLevelKeys(value: unknown): string[] {
     return Object.keys(value).slice(0, 20);
   }
   return [];
-}
-
-function requireString(
-  obj: Record<string, unknown>,
-  key: string,
-  endpoint: string,
-): string {
-  const v = obj[key];
-  if (typeof v !== 'string' || !v) {
-    throw new HtagError(
-      `HTAG ${endpoint} response missing required string field '${key}'. Got keys: [${topLevelKeys(
-        obj,
-      ).join(', ')}]`,
-      endpoint,
-    );
-  }
-  return v;
-}
-
-function requireNumber(
-  obj: Record<string, unknown>,
-  key: string,
-  endpoint: string,
-): number {
-  const v = obj[key];
-  if (typeof v !== 'number' || !Number.isFinite(v)) {
-    throw new HtagError(
-      `HTAG ${endpoint} response missing required number field '${key}'. Got keys: [${topLevelKeys(
-        obj,
-      ).join(', ')}]`,
-      endpoint,
-    );
-  }
-  return v;
-}
-
-function optionalString(
-  obj: Record<string, unknown>,
-  key: string,
-): string | undefined {
-  const v = obj[key];
-  return typeof v === 'string' && v ? v : undefined;
-}
-
-function optionalNumber(
-  obj: Record<string, unknown>,
-  key: string,
-): number | undefined {
-  const v = obj[key];
-  return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
-}
-
-function normalisePropertyType(
-  raw: string | undefined,
-): PropertyDetails['propertyType'] {
-  if (!raw) return undefined;
-  const s = raw.toLowerCase();
-  if (s.includes('house')) return 'House';
-  if (s.includes('unit') || s.includes('apartment')) return 'Unit';
-  if (s.includes('town')) return 'Townhouse';
-  return 'Other';
-}
-
-function normaliseCycleStage(raw: string): MarketContext['cycleStage'] {
-  const s = (raw ?? '').toLowerCase();
-  if (s.startsWith('recov')) return 'Recovery';
-  if (s.startsWith('ris')) return 'Rising';
-  if (s.startsWith('peak')) return 'Peaking';
-  if (s.startsWith('corr')) return 'Correction';
-  return 'Rising';
 }

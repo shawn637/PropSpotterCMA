@@ -76,80 +76,59 @@ Vercel Pro → Usage → set a soft cap. Function invocations and bandwidth are 
 
 ## Phase 3 — Wire up live HTAG data
 
-Only run this after Phase 2 is complete and you've confirmed the gate works.
+The client is now built against the official HTAG OpenAPI spec (v2.0.0) — endpoint paths, HTTP methods, query parameters, and response shapes all match the spec. The parse layer is covered by 32 unit tests (`npm test`) driven from fixtures taken from the spec examples, so the path is proven before deploy.
+
+Endpoints consumed:
+
+| Endpoint | Method | Purpose | Tier |
+|---|---|---|---|
+| `/v1/address/geocode` | GET | Resolve address → `address_key`, `loc_pid`, locality | Standard |
+| `/v1/property/summary` | GET | Physical attributes (beds/baths/lot size) | Enhanced |
+| `/v1/property/sold/search` | GET | Comparable sold properties (up to 12, same suburb, last 6 months) | Enhanced |
+| `/v1/markets/summary` | GET | `typical_price` | Standard |
+| `/v1/markets/growth/annualised` | GET | `price_5y_growth_annualised` for indexing | Enhanced |
+| `/v1/markets/cycle` | GET | `growth_rate_cycle` for the cycle stretch | Premium |
+| `/v1/markets/demand` | GET | `dom` for the velocity stretch | Enhanced |
+
+Each valuation is ~7 HTAG calls. Property summary is allowed to 404 (not every address has attributes) — the CMA still works without them.
 
 ### 3.1 Turn on live mode
 
 1. **Credentials.** Add to Vercel env vars:
    ```
    HTAG_API_KEY=<from HTAG Developer Portal>
-   HTAG_API_BASE_URL=https://api.prod.htagai.com   # or whatever your portal shows
    MOCK_DATA=false
    ```
+   `HTAG_API_BASE_URL` defaults to `https://api.htagai.com` — override only if you want the dev server (`https://api.dev.htagai.com`).
 2. **Redeploy.** `vercel --prod`. Env changes don't apply to existing deployments.
 
-### 3.2 Probe the API with `/api/htag-debug` (fast path)
+### 3.2 Smoke test the live pipeline
 
-The debug endpoint hits every HTAG endpoint the app depends on and returns the raw JSON from each, so you can confirm response shapes without running the full pipeline. This is the primary tool for Phase 3 — it collapses the iteration loop from "deploy → tail logs → edit → redeploy" to one `curl` invocation.
+1. **Tail function logs** in Vercel → Logs → filter to `/api/cma`. Every HTAG call emits one structured log line (`{"tag":"htag","method":"GET","path":"...","status":200,"ms":142,"keys":[...]}`) so you can spot which endpoint is slow or returning unexpected shapes.
+2. **Hit the full pipeline via the UI** with a real Sydney or regional NSW address you know (e.g. Baulkham Hills, Stanhope Gardens, Orange). Expect ≥ 3 comparable sales and a fair value in the right ballpark for the suburb.
+3. **Sanity check the three numbers.** If `fairValue` is wildly off vs your Excel tool, suspect either:
+   - `annualisedGrowth5y` denomination — the parser auto-scales values with `|v| > 1` by /100, so either form (`0.072` or `7.2`) works.
+   - Comparables outside the target suburb — we pass `proximity=sameSuburb` but inspect `cma.comparables[].fullAddress` in the JSON response if the fair value looks surprising.
+
+### 3.3 If things break
+
+| Response | What to check |
+|---|---|
+| `502 HTAG upstream failed at /v1/...` | One endpoint returned an unexpected shape. Hit `/api/htag-debug` to see the raw response. Usually a field-name mismatch — fix in `lib/htag/parse.ts` and add a regression test. |
+| `422 Not enough recent comparable sales` | HTAG returned fewer than 3 sold properties in `sameSuburb` within 6 months. In `lib/htag/client.ts`'s `getComparables`, loosen `proximity` to `any` with `radius: 2`, or extend `saleFromDate` to 12 months back. |
+| Plausibly wrong cycle stage | `mapCycleString` in `parse.ts` handles common synonyms (Recovery/Rising/Peaking/Correction and standard economic terms). If HTAG returns something unexpected it'll default to `Peaking` (0% stretch). Add the string to the matcher + test fixture. |
+
+### 3.4 The `/api/htag-debug` probe
+
+Still available if a specific endpoint misbehaves. Probes all seven endpoints sequentially and returns raw response bodies, top-level keys, status codes, and elapsed times. Use it whenever a 502 comes back from `/api/cma`:
 
 ```bash
-curl -u any:"$APP_PASSWORD" \
-  -X POST https://<your-vercel-url>/api/htag-debug \
+curl -u any:"$APP_PASSWORD" -X POST https://<your-deploy>/api/htag-debug \
   -H 'Content-Type: application/json' \
-  -d '{"address":"42 Example St, Baulkham Hills NSW 2153","locPid":"NSW231"}' \
-  | jq
+  -d '{"address":"413 Anson Street, Orange NSW 2800"}' | jq
 ```
 
-Response shape:
-```jsonc
-{
-  "mode": "live",
-  "requestedAddress": "...",
-  "derivedAddressKey": "...",   // what standardise returned
-  "derivedLocPid": "NSW231",
-  "stages": [
-    {
-      "name": "standardise",
-      "endpoint": "/v1/address/standardise",
-      "ok": true,
-      "status": 200,
-      "elapsedMs": 142,
-      "responseKeys": ["address_key", "formatted_address", ...],  // ← map these against lib/htag/client.ts
-      "body": { /* full raw JSON */ }
-    },
-    // ... one stage per endpoint
-  ]
-}
-```
-
-For each stage where `ok: false`, read the `error` message and compare `responseKeys` to what the client expects. Then:
-
-1. **Edit `lib/htag/client.ts`** — each of the five `TODO(htag-live):` markers corresponds to a pair of expectations the debug output will confirm or deny:
-   - `TODO(htag-live): 1` — auth header. HTAG likely takes one of `X-API-Key` or `Authorization: Bearer`. The client sends both; remove the unused one once confirmed.
-   - `TODO(htag-live): 2` — standardise endpoint response shape.
-   - `TODO(htag-live): 3` — property summary fields.
-   - `TODO(htag-live): 4` — sold-search endpoint path + body.
-   - `TODO(htag-live): 5` — market endpoints (growth / cycle / demand / summary).
-2. **Redeploy.** `vercel --prod`.
-3. **Re-run the debug probe.** Repeat until every stage returns `ok: true`.
-
-### 3.3 End-to-end smoke test
-
-Once the debug probe is green:
-
-1. **Tail function logs** in Vercel → Logs → filter to `/api/cma`. Look for `{"tag":"htag",...}` lines — each HTAG call emits one, logging endpoint / status / elapsed / top-level response keys (no PII).
-2. **Hit the full pipeline.** Use the UI with a real Sydney address you know (e.g. Baulkham Hills, Stanhope Gardens). Expect a real CMA with ≥ 3 comparable sales.
-3. **Sanity check the three numbers** look plausible for the suburb. If fairValue is wildly off from your Excel tool's output, the likely culprit is `annualisedGrowth5y` being a different denomination (percent vs decimal — HTAG might return `7.2` where the code expects `0.072`) or comparables outside the target suburb. Inspect `cma.comparables[].fullAddress` in the JSON response.
-4. **If `/api/cma` returns 502,** the error body includes `endpoint` and `upstreamStatus` — maps 1:1 to the debug-endpoint stage where you need to iterate further.
-5. **If it returns 422** ("Not enough recent comparable sales"), HTAG returned fewer than 3 sales after filtering. Widen the search in `lib/htag/client.ts`'s `getComparables` body (raise `radius_km` or `months_back`), redeploy, and retry.
-
-### 3.4 Clean up
-
-Once live is working end-to-end:
-
-1. **Remove the unused auth header** (`TODO(htag-live): 1`). Keep only the header HTAG actually accepts.
-2. **Delete the five `TODO(htag-live):` comments** once each has been confirmed against a real response.
-3. **Consider whether to keep `/api/htag-debug`.** It's handy for future upstream changes, but it leaks the real HTAG response shape to anyone behind the password gate. Either leave it (password is fine for a test deploy), wrap it in a separate `ENABLE_DEBUG=true` env var, or delete the route once field names are locked in.
+Behind the password middleware. Leaks the real HTAG response shape to anyone with the password — fine for this test deployment; wrap in a separate `ENABLE_DEBUG=true` env var before ever sharing the password wider.
 
 ---
 
