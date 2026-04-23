@@ -5,12 +5,14 @@ import type {
   Comparable,
   PropertyDetails,
   MarketContext,
+  TenureProfile,
   VisionAttributes,
 } from '@/lib/types';
 
 import {
   computeCMA,
   deriveHeuristicAdjustment,
+  deriveTenureAdjustment,
   deriveVisualAdjustment,
   filterComparables,
   isSizeMismatched,
@@ -394,4 +396,127 @@ test('computeCMA: returns zeros + notes when fewer than 3 comps survive filter',
   assert.equal(cma.fairValue, 0);
   assert.equal(cma.comparables.length, 0);
   assert.ok(cma.notes.some((n) => n.includes('minimum')));
+});
+
+// ---------------------------------------------------------------------------
+// deriveTenureAdjustment — ABS G37 SA1 tenure-delta leg
+// ---------------------------------------------------------------------------
+
+function tenure(overrides: Partial<TenureProfile> = {}): TenureProfile {
+  return {
+    sa1Code: '21501138622',
+    totalDwellings: 150,
+    ownerOccupierPct: 70,
+    privateRentalPct: 22,
+    publicHousingPct: 4,
+    otherPct: 4,
+    ...overrides,
+  };
+}
+
+test('deriveTenureAdjustment: missing profile on either side → factor 1', () => {
+  assert.equal(deriveTenureAdjustment(undefined, tenure()), 1);
+  assert.equal(deriveTenureAdjustment(tenure(), undefined), 1);
+  assert.equal(deriveTenureAdjustment(undefined, undefined), 1);
+});
+
+test('deriveTenureAdjustment: same SA1 short-circuits to factor 1', () => {
+  const a = tenure({ sa1Code: 'SAME', ownerOccupierPct: 60, publicHousingPct: 15 });
+  const b = tenure({ sa1Code: 'SAME', ownerOccupierPct: 60, publicHousingPct: 15 });
+  assert.equal(deriveTenureAdjustment(a, b), 1);
+});
+
+test('deriveTenureAdjustment: subject in high-PH pocket vs comp in low-PH pocket → discount', () => {
+  // Subject sits in a 15% public-housing pocket. Comp sits in a 2%
+  // pocket. Comp's sale price reflects the nicer area; the subject
+  // should be priced lower. Factor < 1.
+  const subjectT = tenure({
+    sa1Code: 'SA1-SUBJ',
+    publicHousingPct: 15,
+    ownerOccupierPct: 55,
+  });
+  const compT = tenure({
+    sa1Code: 'SA1-COMP',
+    publicHousingPct: 2,
+    ownerOccupierPct: 75,
+  });
+  const f = deriveTenureAdjustment(subjectT, compT);
+  assert.ok(f < 1, `expected discount, got ${f}`);
+  // 13pp PH delta × -0.004 = -0.052; 20pp OO delta × -0.001 = -0.020.
+  // Combined ~ -7%. Within the [0.88, 1.12] clamp.
+  assert.ok(f >= 0.88, `factor ${f} should be >= 0.88`);
+});
+
+test('deriveTenureAdjustment: subject in low-PH pocket vs comp in high-PH pocket → uplift', () => {
+  const subjectT = tenure({
+    sa1Code: 'SA1-SUBJ',
+    publicHousingPct: 2,
+    ownerOccupierPct: 75,
+  });
+  const compT = tenure({
+    sa1Code: 'SA1-COMP',
+    publicHousingPct: 20,
+    ownerOccupierPct: 45,
+  });
+  const f = deriveTenureAdjustment(subjectT, compT);
+  assert.ok(f > 1, `expected uplift, got ${f}`);
+  assert.ok(f <= 1.12, `factor ${f} should be <= 1.12`);
+});
+
+test('deriveTenureAdjustment: extreme worst-case clamps to [0.88, 1.12]', () => {
+  // 40pp PH delta, 60pp OO delta the wrong way.
+  const subjectT = tenure({
+    sa1Code: 'A',
+    publicHousingPct: 40,
+    ownerOccupierPct: 20,
+  });
+  const compT = tenure({
+    sa1Code: 'B',
+    publicHousingPct: 0,
+    ownerOccupierPct: 80,
+  });
+  const f = deriveTenureAdjustment(subjectT, compT);
+  assert.ok(f >= 0.88 && f <= 1.12, `factor ${f} must be clamped`);
+  assert.ok(f < 1);
+});
+
+test('deriveTenureAdjustment: small deltas → small adjustments', () => {
+  // 3pp PH delta. Subject has slightly more public housing than comp,
+  // so comp reflects a marginally nicer area — subject gets a small
+  // discount. Should be well under 2%.
+  const subjectT = tenure({ sa1Code: 'A', publicHousingPct: 5 });
+  const compT = tenure({ sa1Code: 'B', publicHousingPct: 2 });
+  const f = deriveTenureAdjustment(subjectT, compT);
+  assert.ok(f < 1 && f > 0.98, `expected small discount, got ${f}`);
+});
+
+test('deriveHeuristicAdjustment: tenure leg multiplies through', () => {
+  const subjectT = tenure({
+    sa1Code: 'A',
+    publicHousingPct: 12,
+    ownerOccupierPct: 55,
+  });
+  const compT = tenure({
+    sa1Code: 'B',
+    publicHousingPct: 2,
+    ownerOccupierPct: 75,
+  });
+  const subjectWithTenure: PropertyDetails = {
+    ...subject,
+    tenureProfile: subjectT,
+  };
+  const compMatch = makeComp({ addressKey: 'C', tenureProfile: compT });
+  const withTenure = deriveHeuristicAdjustment(subjectWithTenure, compMatch);
+  const withoutTenure = deriveHeuristicAdjustment(
+    subject,
+    makeComp({ addressKey: 'C' }),
+  );
+  // The tenure delta should pull the subject-with-PH-baggage version
+  // BELOW the baseline — comp is in the nicer SA1.
+  assert.ok(
+    withTenure < withoutTenure,
+    `tenure leg should discount subject (with=${withTenure}, without=${withoutTenure})`,
+  );
+  // And stay inside the outer [0.7, 1.3] clamp on heuristic.
+  assert.ok(withTenure >= 0.7);
 });

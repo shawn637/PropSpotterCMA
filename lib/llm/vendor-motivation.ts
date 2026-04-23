@@ -228,7 +228,13 @@ export async function generateNarrative(args: {
       const vision = c.visionAttrs
         ? formatVisionForPrompt(c.visionAttrs)
         : 'no visual profile';
-      return `  * ${c.fullAddress} — sold $${c.salePrice.toLocaleString()} (${shortDate(c.saleDateIso)}), adj ${c.adjustmentFactor.toFixed(3)} → implied $${Math.round(c.impliedSubjectValue).toLocaleString()}; ${vision}`;
+      // Per-comp tenure lets the narrative call out WHY a neighbouring
+      // sale got discounted vs the subject (e.g. "this comp sits in
+      // a different SA1 with 18% public housing vs the subject's 3%").
+      const tenure = c.tenureProfile
+        ? `SA1 ${c.tenureProfile.sa1Code}: ${c.tenureProfile.ownerOccupierPct.toFixed(0)}% OO / ${c.tenureProfile.privateRentalPct.toFixed(0)}% private rental / ${c.tenureProfile.publicHousingPct.toFixed(0)}% public housing`
+        : 'tenure not resolved';
+      return `  * ${c.fullAddress} — sold $${c.salePrice.toLocaleString()} (${shortDate(c.saleDateIso)}), adj ${c.adjustmentFactor.toFixed(3)} → implied $${Math.round(c.impliedSubjectValue).toLocaleString()}; ${vision}; ${tenure}`;
     })
     .join('\n');
 

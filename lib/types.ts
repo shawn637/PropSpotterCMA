@@ -102,6 +102,10 @@ export interface PropertyDetails {
   yearBuilt?: number;
   propertyType?: 'House' | 'Unit' | 'Townhouse' | 'Other';
   visionAttrs?: VisionAttributes;
+  /** ABS 2021 Census G37 tenure shares for the subject's SA1.
+   *  Populated in /api/cma after geocoding. Consumed by compute.ts's
+   *  deriveTenureAdjustment and by the narrative prompt. */
+  tenureProfile?: TenureProfile;
 }
 
 export interface Comparable {
@@ -119,6 +123,15 @@ export interface Comparable {
   htagAdjustmentFactor?: number;
   propertyType?: 'House' | 'Unit' | 'Townhouse' | 'Other';
   visionAttrs?: VisionAttributes;
+  /** WGS84 decimal degrees — only when HTAG sold-search surfaces them.
+   *  Used to look up the comp's SA1 for the tenure adjustment. */
+  latitude?: number;
+  longitude?: number;
+  /** ABS 2021 Census G37 tenure shares for THIS comp's SA1. Distinct
+   *  from the subject's tenureProfile and from FullValuationResult's
+   *  subject-level tenureProfile. Populated in the CMA route by
+   *  fetching in parallel with the subject tenure call. */
+  tenureProfile?: TenureProfile;
 }
 
 export interface ComparableWithDerived extends Comparable {

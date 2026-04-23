@@ -229,6 +229,19 @@ export function parseSoldSearch(
     const dedupKey = `${salePrice}|${saleDate}`;
     if (seen.has(dedupKey)) return [];
     seen.add(dedupKey);
+    // Extract coords with the same forgiving multi-name approach as
+    // parseGeocode — HTAG's sold-search is not guaranteed to return
+    // them, but when it does the tenure-delta adjustment kicks in.
+    let latitude = pickNumber(row, 'latitude', 'lat', 'y');
+    let longitude = pickNumber(row, 'longitude', 'lng', 'lon', 'x');
+    if ((latitude == null || longitude == null) && isObject(row.geometry)) {
+      const coords = (row.geometry as Record<string, unknown>).coordinates;
+      if (Array.isArray(coords) && coords.length >= 2) {
+        const [lng, lat] = coords;
+        if (typeof lat === 'number' && Number.isFinite(lat)) latitude = lat;
+        if (typeof lng === 'number' && Number.isFinite(lng)) longitude = lng;
+      }
+    }
     return [
       {
         addressKey,
@@ -242,6 +255,8 @@ export function parseSoldSearch(
         carSpaces: pickInteger(row, 'car_spaces'),
         distanceKm: pickNumber(row, 'distance_km'),
         propertyType: normalisePropertyType(pickString(row, 'property_type')),
+        latitude,
+        longitude,
       } satisfies Comparable,
     ];
   });

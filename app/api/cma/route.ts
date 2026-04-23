@@ -64,24 +64,50 @@ export async function POST(req: Request) {
   const { address, listingDescription, actualDaysOnMarket } = parsed.data;
 
   try {
-    const subject = await getSubjectProperty(address);
-    // Fire HTAG comparables + market AND the ABS G37 tenure query in
-    // parallel. The ABS leg is wrapped so it can never reject the
-    // whole valuation — a 5 s timeout on the ArcGIS fetch plus a
-    // Promise.allSettled boundary here means a slow ABS response is
+    const subjectRaw = await getSubjectProperty(address);
+    // Fire HTAG comparables + market AND the ABS G37 tenure query for
+    // the subject in parallel. The ABS leg is wrapped so it can never
+    // reject the whole valuation — a 5 s timeout on the ArcGIS fetch
+    // plus a .catch boundary here means a slow ABS response is
     // capped at 5 s of added wall time and always yields null rather
     // than a thrown error.
-    const tenurePromise: Promise<TenureProfile | null> =
-      subject.latitude != null && subject.longitude != null
-        ? fetchTenureByPoint(subject.latitude, subject.longitude).then(
+    const subjectTenurePromise: Promise<TenureProfile | null> =
+      subjectRaw.latitude != null && subjectRaw.longitude != null
+        ? fetchTenureByPoint(subjectRaw.latitude, subjectRaw.longitude).then(
             (r) => r.profile,
           )
         : Promise.resolve(null);
-    const [comparables, market, tenureProfile] = await Promise.all([
-      getComparables(subject),
-      getMarketContext(subject),
-      tenurePromise.catch(() => null),
+    const [comparablesRaw, market, subjectTenure] = await Promise.all([
+      getComparables(subjectRaw),
+      getMarketContext(subjectRaw),
+      subjectTenurePromise.catch(() => null),
     ]);
+    const subject: typeof subjectRaw = {
+      ...subjectRaw,
+      tenureProfile: subjectTenure ?? undefined,
+    };
+
+    // Per-comp tenure: fire ABS in parallel for every comp that
+    // carries lat/lng. Comps without coords get no tenure (the
+    // deriveTenureAdjustment leg no-ops for those). Comps in the
+    // same SA1 as the subject will get factor 1.0 anyway, which is
+    // the common case for sold-search results restricted to
+    // proximity=sameSuburb.
+    const compTenureResults = await Promise.all(
+      comparablesRaw.map(async (c) => {
+        if (c.latitude == null || c.longitude == null) return null;
+        try {
+          const r = await fetchTenureByPoint(c.latitude, c.longitude);
+          return r.profile;
+        } catch {
+          return null;
+        }
+      }),
+    );
+    const comparables = comparablesRaw.map((c, i) => ({
+      ...c,
+      tenureProfile: compTenureResults[i] ?? undefined,
+    }));
 
     const cma = computeCMA(subject, comparables, market);
 
@@ -115,7 +141,7 @@ export async function POST(req: Request) {
         vendorAssessment,
         maxPrice,
         actualDaysOnMarket,
-        tenureProfile: tenureProfile ?? undefined,
+        tenureProfile: subjectTenure ?? undefined,
       });
 
     const payload: FullValuationResult = {
@@ -129,8 +155,17 @@ export async function POST(req: Request) {
       dataSource: isMockMode() ? 'mock' : 'live',
       requestedAddress: address,
       actualDaysOnMarket,
-      tenureProfile: tenureProfile ?? undefined,
+      tenureProfile: subjectTenure ?? undefined,
     };
+
+    // How many comps had their per-SA1 tenure resolved, plus the
+    // range of PH shares we saw. Useful for spotting when HTAG stops
+    // returning coords on the sold-search side and the per-comp
+    // tenure leg silently degrades.
+    const compsWithTenure = comparables.filter((c) => !!c.tenureProfile);
+    const compPhShares = compsWithTenure.map(
+      (c) => c.tenureProfile!.publicHousingPct,
+    );
 
     logValuation({
       dataSource: payload.dataSource,
@@ -153,14 +188,20 @@ export async function POST(req: Request) {
       },
       llmTokens: sumTokens(vendorUsage, narrativeUsage),
       actualDaysOnMarket,
-      tenure: tenureProfile
+      tenure: subjectTenure
         ? {
-            sa1: tenureProfile.sa1Code,
-            ownerOccupier: tenureProfile.ownerOccupierPct,
-            privateRental: tenureProfile.privateRentalPct,
-            publicHousing: tenureProfile.publicHousingPct,
+            sa1: subjectTenure.sa1Code,
+            ownerOccupier: subjectTenure.ownerOccupierPct,
+            privateRental: subjectTenure.privateRentalPct,
+            publicHousing: subjectTenure.publicHousingPct,
           }
         : null,
+      compsTenureCoverage: {
+        total: comparables.length,
+        resolved: compsWithTenure.length,
+        phMin: compPhShares.length > 0 ? Math.min(...compPhShares) : null,
+        phMax: compPhShares.length > 0 ? Math.max(...compPhShares) : null,
+      },
     });
 
     return NextResponse.json(payload, { headers: rateLimitHeaders(rl) });
@@ -231,6 +272,12 @@ function logValuation(info: {
     privateRental: number;
     publicHousing: number;
   } | null;
+  compsTenureCoverage: {
+    total: number;
+    resolved: number;
+    phMin: number | null;
+    phMax: number | null;
+  };
 }): void {
   console.log(JSON.stringify({ tag: 'valuation', ...info }));
 }

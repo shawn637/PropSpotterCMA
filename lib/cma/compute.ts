@@ -10,6 +10,7 @@ import type {
   PropertyDetails,
   RoomCondition,
   StoreyCount,
+  TenureProfile,
   VisionAttributes,
   VisualFeature,
 } from '@/lib/types';
@@ -93,7 +94,60 @@ export function deriveHeuristicAdjustment(
   // differences that HTAG's structural fields never expose.
   factor *= deriveVisualAdjustment(subject.visionAttrs, comp.visionAttrs);
 
+  // Neighbourhood tenure adjustment — SA1-level public-housing share
+  // and owner-occupancy rate. Compensates for comps drawn from a
+  // materially different tenure mix than the subject's pocket (e.g.
+  // subject in a high-PH pocket, comp pulled from a low-PH pocket
+  // nearby — the comp's sale price overstates what the subject
+  // should realistically trade for).
+  factor *= deriveTenureAdjustment(subject.tenureProfile, comp.tenureProfile);
+
   return clamp(factor, 0.7, 1.3);
+}
+
+/**
+ * Adjustment factor driven by the DELTA between subject's and comp's
+ * SA1 tenure profile. Returns a multiplier in [0.88, 1.12]:
+ *   factor > 1  → comp sits in a higher-public-housing / lower-owner-
+ *                 occupancy pocket than subject, so the comp's sale
+ *                 price understates what the subject should trade for
+ *                 (uplift).
+ *   factor < 1  → comp sits in a materially nicer pocket than subject
+ *                 (less PH, more OO), so its sale overstates the
+ *                 subject's value (discount).
+ *
+ * Weights calibrated against Australian valuer practice:
+ *   - Public-housing delta: 0.4% per percentage-point, capped at ±8%.
+ *     Example: subject in a 15% PH pocket, comp in a 2% PH pocket
+ *     (13pp delta) → comp's sale is priced ~5% above what the subject
+ *     should be; we discount subject's implied value by ~5%.
+ *   - Owner-occupancy delta: 0.1% per percentage-point, capped at ±3%.
+ *     Stability signal — high owner-occupancy reads as family-
+ *     dominated and typically commands a slight premium.
+ *
+ * Returns 1.0 when either side is missing a tenure profile, so comps
+ * without coords from HTAG no-op cleanly.
+ */
+export function deriveTenureAdjustment(
+  subject: TenureProfile | undefined,
+  comp: TenureProfile | undefined,
+): number {
+  if (!subject || !comp) return 1;
+  // Same SA1 → factor exactly 1 (shortcut + avoids floating drift).
+  if (subject.sa1Code === comp.sa1Code) return 1;
+
+  // Public-housing delta. comp.ph - subject.ph > 0 means comp is in
+  // a higher-PH pocket (worse area) → subject is nicer by comparison
+  // → uplift subject relative to comp's sale.
+  const phDelta = comp.publicHousingPct - subject.publicHousingPct;
+  const phFactor = 1 + clamp(phDelta * 0.004, -0.08, 0.08);
+
+  // Owner-occupancy delta. subject.oo - comp.oo > 0 means subject is
+  // in a more owner-occupied (more stable) pocket → uplift subject.
+  const ooDelta = subject.ownerOccupierPct - comp.ownerOccupierPct;
+  const ooFactor = 1 + clamp(ooDelta * 0.001, -0.03, 0.03);
+
+  return clamp(phFactor * ooFactor, 0.88, 1.12);
 }
 
 /**
