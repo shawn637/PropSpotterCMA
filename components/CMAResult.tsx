@@ -140,6 +140,14 @@ export function CMAResult({
   >(null);
   const [autoFetchError, setAutoFetchError] = useState<string | null>(null);
   const [autoFetchUnmatched, setAutoFetchUnmatched] = useState<string[]>([]);
+  // Which tier sourced the subject photos. null = nothing fetched yet
+  // (or fetch failed entirely). 'rea-property-detail' means the
+  // Tier-2 raw HTML fallback fired, which we should call out so the
+  // user knows visual comparison is on slightly thinner ice than a
+  // current REA listing would give.
+  const [subjectPhotoSource, setSubjectPhotoSource] = useState<
+    'rea-buy' | 'rea-sold' | 'rea-property-detail' | null
+  >(null);
 
   // Recompute CMA + three-numbers on the fly whenever the excluded set,
   // the vision attributes, or the source data change. No server
@@ -345,10 +353,11 @@ export function CMAResult({
           state: subject.state,
           postcode: subject.postcode,
           propertyType: (subject.propertyType ?? 'house').toLowerCase(),
-          // 2 pages covers busy suburbs like Blacktown where the subject
-          // might be on page 2 of the buy channel. Still ~40-60 s wall
-          // clock on a cold Apify start.
-          maxPagesToScrape: 2,
+          // 10 pages = ~500 listings per channel, the deepest sweep
+          // we offer. Catches subjects on page 7+ of busy suburbs.
+          // Tier-2 REA property-detail fallback in /api/photos/poll
+          // picks up anything still missed.
+          maxPagesToScrape: 10,
         }),
       });
       if (!startRes.ok) {
@@ -376,8 +385,12 @@ export function CMAResult({
         imageUrls: string[];
         matchReason: 'address' | 'price+date';
       };
+      type SubjectMatch = Match & {
+        source?: 'rea-buy' | 'rea-sold' | 'rea-property-detail';
+        fallbackUsed?: boolean;
+      };
       let matched: Match[] = [];
-      let subjectMatch: Match | null = null;
+      let subjectMatch: SubjectMatch | null = null;
       let unmatched: string[] = [];
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
         await new Promise((r) => setTimeout(r, pollIntervalMs));
@@ -391,6 +404,9 @@ export function CMAResult({
             subject: {
               addressKey: subject.addressKey,
               fullAddress: subject.fullAddress,
+              suburb: subject.suburb,
+              state: subject.state,
+              postcode: subject.postcode,
             },
           }),
         });
@@ -402,7 +418,7 @@ export function CMAResult({
           status: string;
           finished: boolean;
           matched?: Match[];
-          subjectMatch?: Match | null;
+          subjectMatch?: SubjectMatch | null;
           unmatchedAddressKeys?: string[];
         };
         if (body.finished) {
@@ -435,6 +451,7 @@ export function CMAResult({
         return next;
       });
       setAutoFetchUnmatched(unmatched);
+      setSubjectPhotoSource(subjectMatch?.source ?? null);
       setAutoFetching('done');
 
       // 4. Chain straight into Claude Vision. Include subject match if
@@ -970,6 +987,32 @@ export function CMAResult({
         {autoFetchError && (
           <div className="mb-3 rounded-md bg-red-50 border border-red-200 text-red-800 px-3 py-2 text-xs">
             {autoFetchError}
+          </div>
+        )}
+
+        {autoFetching === 'done' && subjectPhotoSource === 'rea-property-detail' && (
+          <div className="mb-3 rounded-md bg-amber-50 border border-amber-200 text-amber-900 px-3 py-2 text-xs">
+            <strong>Subject photos via fallback.</strong> The subject
+            wasn&rsquo;t in the suburb-wide REA scrape (off-market, sold
+            years ago, or beyond the 10-page sweep), so we pulled images
+            directly from REA&rsquo;s permanent property-detail page.
+            That fallback is flakier than a current listing — the gallery
+            may be stale or partial. Visual comparison still runs as
+            normal.
+          </div>
+        )}
+
+        {autoFetching === 'done' && subjectPhotoSource === null && (
+          <div className="mb-3 rounded-md bg-red-50 border border-red-300 text-red-900 px-3 py-2 text-xs">
+            <strong>Subject photos unavailable.</strong> Neither the
+            suburb-wide REA scrape nor the property-detail fallback
+            returned a usable gallery for the subject. Visual
+            comparison is <strong>disabled</strong> for this run —
+            adjustment factors fall back to structural data (land,
+            floor, beds, baths, year built) only, and the kitchen /
+            bathroom / land-quality / feature legs of the similarity
+            adjustment will read as neutral. Paste any subject image
+            URL below to re-enable the visual comparison.
           </div>
         )}
 

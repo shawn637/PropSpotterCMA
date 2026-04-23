@@ -25,11 +25,15 @@ const StartRequest = z.object({
   state: z.string().min(2).max(8),
   postcode: z.string().regex(/^\d{4}$/),
   propertyType: z.enum(['house', 'unit', 'townhouse', 'any']).default('house'),
-  // 2 pages = ~100 listings per channel, the sweet spot for busy
-  // suburbs like Blacktown where a subject sitting on page 2 of the
-  // buy channel would otherwise go unmatched. Cost stays in the
-  // $0.04-$0.20 range per valuation.
-  maxPagesToScrape: z.number().int().min(1).max(5).default(2),
+  // 10 pages = ~500 listings per channel. Covers virtually every
+  // subject in any AU suburb, even the very large ones where the
+  // listing might be on page 7+ of the buy channel. The Tier-2
+  // raw REA property-detail fetch in /api/photos/poll picks up
+  // anything still missed (off-market, sold years ago). Apify cost
+  // scales linearly with pages, ~$0.20-0.50 per valuation at 10
+  // pages × 2 channels; wall time ~60-120 s for cold starts, well
+  // within the client's 3-min poll window.
+  maxPagesToScrape: z.number().int().min(1).max(10).default(10),
 });
 
 export async function POST(req: Request) {

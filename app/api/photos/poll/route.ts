@@ -11,11 +11,15 @@ import {
   matchListingsToComps,
   type ReaScraperListing,
 } from '@/lib/apify/match';
+import { fetchSubjectImagesFromRea } from '@/lib/photos/rea-property-detail';
 import { clientKey, rateLimit } from '@/lib/ratelimit';
 import type { Comparable } from '@/lib/types';
 
 export const runtime = 'nodejs';
-export const maxDuration = 30;
+// Bumped from 30 → 60 so the optional Tier-2 REA property-detail
+// fallback (raw HTML fetch + parse, ~2-8 s when active) has headroom
+// on top of the Apify dataset fetch + matching legs.
+export const maxDuration = 60;
 
 /**
  * Poll the sold + buy Apify runs started by /api/photos/start. Returns
@@ -71,6 +75,12 @@ const PollRequest = z.object({
     .object({
       addressKey: z.string().min(1),
       fullAddress: z.string().min(1),
+      // Optional — supplied so the Tier-2 fallback can build REA
+      // property-detail URLs from address parts when the Apify
+      // suburb scrape misses the subject.
+      suburb: z.string().min(1).max(80).optional(),
+      state: z.string().min(2).max(8).optional(),
+      postcode: z.string().regex(/^\d{4}$/).optional(),
     })
     .optional(),
 });
@@ -156,17 +166,56 @@ export async function POST(req: Request) {
     // Subject matches from buy dataset first (typical pre-purchase case:
     // subject is currently listed). Fall back to sold if not found —
     // covers the case where the subject itself recently sold.
-    let subjectMatch: ReturnType<
-      typeof matchListingsToComps
-    >['subject'];
+    type SubjectMatchWithSource =
+      | (NonNullable<ReturnType<typeof matchListingsToComps>['subject']> & {
+          source: 'rea-buy' | 'rea-sold' | 'rea-property-detail';
+          fallbackUsed: boolean;
+        })
+      | null;
+    let subjectMatch: SubjectMatchWithSource = null;
     if (subject) {
       const buyTry = matchListingsToComps([], buyListings, subject);
       if (buyTry.subject) {
-        subjectMatch = buyTry.subject;
+        subjectMatch = { ...buyTry.subject, source: 'rea-buy', fallbackUsed: false };
       } else {
         const soldTry = matchListingsToComps([], soldListings, subject);
         if (soldTry.subject) {
-          subjectMatch = soldTry.subject;
+          subjectMatch = {
+            ...soldTry.subject,
+            source: 'rea-sold',
+            fallbackUsed: false,
+          };
+        }
+      }
+
+      // Tier-2 fallback: subject not in either suburb scrape. Hit
+      // REA's permanent property-detail page directly. Flaky by
+      // design — REA's URL slug isn't strictly deterministic from
+      // address parts and the page can be bot-blocked at the egress
+      // IP — but covers the common "not currently listed" case.
+      // Whether it succeeded or not is surfaced in the response
+      // payload so the UI can show a "Photos via fallback" badge.
+      if (
+        !subjectMatch &&
+        subject.suburb &&
+        subject.state &&
+        subject.postcode
+      ) {
+        const tier2 = await fetchSubjectImagesFromRea({
+          fullAddress: subject.fullAddress,
+          suburb: subject.suburb,
+          state: subject.state,
+          postcode: subject.postcode,
+        });
+        if (tier2.imageUrls.length > 0) {
+          subjectMatch = {
+            addressKey: subject.addressKey,
+            imageUrl: tier2.imageUrls[0],
+            imageUrls: tier2.imageUrls,
+            matchReason: 'address',
+            source: 'rea-property-detail',
+            fallbackUsed: true,
+          };
         }
       }
     }
@@ -198,6 +247,8 @@ export async function POST(req: Request) {
         matchedCount: compsMatchResult.comps.length,
         unmatchedCount: unmatchedAddressKeys.length,
         subjectMatched: !!subjectMatch,
+        subjectSource: subjectMatch?.source ?? null,
+        subjectFallbackUsed: subjectMatch?.fallbackUsed ?? false,
         errors,
       }),
     );
