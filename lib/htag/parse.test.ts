@@ -285,6 +285,83 @@ test('parseGeocode: extracts identity fields from spec fixture', () => {
   assert.equal(r.fullAddress, '413 Anson Street, Orange NSW 2800');
 });
 
+test('parseGeocode: extracts latitude/longitude when present', () => {
+  const fixture = {
+    results: [
+      {
+        address_key: 'K',
+        loc_pid: 'NSW-X',
+        locality_name: 'Orange',
+        state: 'NSW',
+        postcode: '2800',
+        latitude: -33.2839,
+        longitude: 149.099,
+      },
+    ],
+  };
+  const r = parseGeocode(fixture);
+  assert.equal(r.latitude, -33.2839);
+  assert.equal(r.longitude, 149.099);
+});
+
+test('parseGeocode: coordinates absent → undefined, other fields still populated', () => {
+  const fixture = {
+    results: [
+      {
+        address_key: 'K',
+        loc_pid: 'NSW-X',
+        locality_name: 'Orange',
+        state: 'NSW',
+        postcode: '2800',
+      },
+    ],
+  };
+  const r = parseGeocode(fixture);
+  assert.equal(r.latitude, undefined);
+  assert.equal(r.longitude, undefined);
+  assert.equal(r.addressKey, 'K');
+});
+
+test('parseGeocode: accepts lat/lng short names too', () => {
+  const fixture = {
+    results: [
+      {
+        address_key: 'K',
+        loc_pid: 'NSW-X',
+        locality_name: 'Orange',
+        state: 'NSW',
+        postcode: '2800',
+        lat: -33.75,
+        lng: 150.887,
+      },
+    ],
+  };
+  const r = parseGeocode(fixture);
+  assert.equal(r.latitude, -33.75);
+  assert.equal(r.longitude, 150.887);
+});
+
+test('parseGeocode: falls back to GeoJSON geometry.coordinates', () => {
+  const fixture = {
+    results: [
+      {
+        address_key: 'K',
+        loc_pid: 'NSW-X',
+        locality_name: 'Orange',
+        state: 'NSW',
+        postcode: '2800',
+        geometry: {
+          type: 'Point',
+          coordinates: [150.887, -33.75],
+        },
+      },
+    ],
+  };
+  const r = parseGeocode(fixture);
+  assert.equal(r.latitude, -33.75);
+  assert.equal(r.longitude, 150.887);
+});
+
 test('parseGeocode: synthesises fullAddress from parts when address_label is absent', () => {
   const fixture = {
     results: [

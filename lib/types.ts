@@ -89,6 +89,11 @@ export interface PropertyDetails {
   state: string;
   postcode: string;
   locPid: string;
+  /** WGS84 decimal degrees. Optional — not every geocode response
+   *  carries coordinates, and the CMA math doesn't need them. The ABS
+   *  G37 spatial query is the main consumer. */
+  latitude?: number;
+  longitude?: number;
   landAreaSqm?: number;
   floorAreaSqm?: number;
   bedrooms?: number;
@@ -182,10 +187,34 @@ export interface FullValuationResult {
   dataSource: 'mock' | 'live';
   requestedAddress: string;
   actualDaysOnMarket?: number;
+  /** ABS 2021 Census G37 tenure share at the subject's SA1. Optional —
+   *  the valuation renders without it if the ABS FeatureServer is
+   *  unreachable or we couldn't resolve an SA1 for the subject. */
+  tenureProfile?: TenureProfile;
 }
 
 export interface CMARequest {
   address: string;
   listingDescription?: string;
   actualDaysOnMarket?: number;
+}
+
+/**
+ * ABS 2021 Census G37 tenure shares at SA1 granularity (~200-800 people,
+ * the finest ABS statistical unit). Sourced live from the ABS Digital
+ * Atlas ArcGIS FeatureServer; see lib/abs/client.ts.
+ *
+ * The three headline percentages don't sum to 100 because G37 includes
+ * minor tenure categories we don't surface (rent-free, life tenure,
+ * "tenure not stated", rented from individuals not in the same
+ * household). `otherPct` captures the residual so the UI can make that
+ * transparent rather than hide the gap.
+ */
+export interface TenureProfile {
+  sa1Code: string;
+  totalDwellings: number;
+  ownerOccupierPct: number;
+  privateRentalPct: number;
+  publicHousingPct: number;
+  otherPct: number;
 }

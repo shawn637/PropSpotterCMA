@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
 
+import { fetchTenureByPoint } from '@/lib/abs/client';
 import { computeCMA } from '@/lib/cma/compute';
 import { computeMaxPrice } from '@/lib/cma/maxprice';
 import {
@@ -16,7 +17,7 @@ import {
   type TokenUsage,
 } from '@/lib/llm/vendor-motivation';
 import { clientKey, rateLimit } from '@/lib/ratelimit';
-import type { FullValuationResult } from '@/lib/types';
+import type { FullValuationResult, TenureProfile } from '@/lib/types';
 
 export const runtime = 'nodejs';
 export const maxDuration = 30;
@@ -64,9 +65,22 @@ export async function POST(req: Request) {
 
   try {
     const subject = await getSubjectProperty(address);
-    const [comparables, market] = await Promise.all([
+    // Fire HTAG comparables + market AND the ABS G37 tenure query in
+    // parallel. The ABS leg is wrapped so it can never reject the
+    // whole valuation — a 5 s timeout on the ArcGIS fetch plus a
+    // Promise.allSettled boundary here means a slow ABS response is
+    // capped at 5 s of added wall time and always yields null rather
+    // than a thrown error.
+    const tenurePromise: Promise<TenureProfile | null> =
+      subject.latitude != null && subject.longitude != null
+        ? fetchTenureByPoint(subject.latitude, subject.longitude).then(
+            (r) => r.profile,
+          )
+        : Promise.resolve(null);
+    const [comparables, market, tenureProfile] = await Promise.all([
       getComparables(subject),
       getMarketContext(subject),
+      tenurePromise.catch(() => null),
     ]);
 
     const cma = computeCMA(subject, comparables, market);
@@ -101,6 +115,7 @@ export async function POST(req: Request) {
         vendorAssessment,
         maxPrice,
         actualDaysOnMarket,
+        tenureProfile: tenureProfile ?? undefined,
       });
 
     const payload: FullValuationResult = {
@@ -114,6 +129,7 @@ export async function POST(req: Request) {
       dataSource: isMockMode() ? 'mock' : 'live',
       requestedAddress: address,
       actualDaysOnMarket,
+      tenureProfile: tenureProfile ?? undefined,
     };
 
     logValuation({
@@ -137,6 +153,14 @@ export async function POST(req: Request) {
       },
       llmTokens: sumTokens(vendorUsage, narrativeUsage),
       actualDaysOnMarket,
+      tenure: tenureProfile
+        ? {
+            sa1: tenureProfile.sa1Code,
+            ownerOccupier: tenureProfile.ownerOccupierPct,
+            privateRental: tenureProfile.privateRentalPct,
+            publicHousing: tenureProfile.publicHousingPct,
+          }
+        : null,
     });
 
     return NextResponse.json(payload, { headers: rateLimitHeaders(rl) });
@@ -201,6 +225,12 @@ function logValuation(info: {
   numbers: { opening: number; target: number; walkAway: number };
   llmTokens: TokenUsage;
   actualDaysOnMarket?: number;
+  tenure: {
+    sa1: string;
+    ownerOccupier: number;
+    privateRental: number;
+    publicHousing: number;
+  } | null;
 }): void {
   console.log(JSON.stringify({ tag: 'valuation', ...info }));
 }

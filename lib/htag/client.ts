@@ -187,6 +187,8 @@ export async function getSubjectProperty(
     state: geocode.state,
     postcode: geocode.postcode,
     locPid: geocode.locPid,
+    latitude: geocode.latitude,
+    longitude: geocode.longitude,
     bedrooms: summary.bedrooms,
     bathrooms: summary.bathrooms,
     carSpaces: summary.carSpaces,

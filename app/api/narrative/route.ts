@@ -58,6 +58,7 @@ export async function POST(req: Request) {
       vendorAssessment: data.vendorAssessment,
       maxPrice: data.maxPrice,
       actualDaysOnMarket: data.actualDaysOnMarket,
+      tenureProfile: data.tenureProfile,
     });
 
     console.log(

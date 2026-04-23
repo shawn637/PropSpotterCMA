@@ -692,6 +692,51 @@ export function CMAResult({
         </section>
       </div>
 
+      {data.tenureProfile && (
+        <section className="rounded-lg bg-white border border-slate-200 p-4">
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="text-sm font-semibold text-navy">
+              Neighbourhood tenure
+            </h3>
+            <span className="text-xs text-slate-400">
+              ABS 2021 Census · SA1 {data.tenureProfile.sa1Code} ·{' '}
+              {data.tenureProfile.totalDwellings} dwellings
+            </span>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+            <TenureCell
+              label="Owner-occupied"
+              value={data.tenureProfile.ownerOccupierPct}
+              accent="text-teal"
+            />
+            <TenureCell
+              label="Private rental"
+              value={data.tenureProfile.privateRentalPct}
+              accent="text-navy"
+            />
+            <TenureCell
+              label="Public housing"
+              value={data.tenureProfile.publicHousingPct}
+              accent="text-gold"
+            />
+            <TenureCell
+              label="Other / not stated"
+              value={data.tenureProfile.otherPct}
+              accent="text-slate-500"
+            />
+          </div>
+          <p className="mt-2 text-xs text-slate-500">
+            Shares are from the Australian Bureau of Statistics 2021 Census
+            G37 table at the subject&rsquo;s SA1 (Statistical Area Level 1 —
+            the finest ABS unit, typically 200&ndash;800 people). Private
+            rental covers real-estate-agent and other private landlords;
+            public housing covers state/territory and community housing.
+            Shares may not sum to 100% because some dwellings fall in minor
+            categories (rent-free, tenure not stated).
+          </p>
+        </section>
+      )}
+
       <section className="rounded-lg bg-white border border-slate-200 p-4">
         <h3 className="text-sm font-semibold text-navy mb-2">
           Adjustments applied
@@ -970,6 +1015,23 @@ export function CMAResult({
         financial adviser. These figures are research output, not personal
         financial advice. You make the final decision on any offer.
       </p>
+    </div>
+  );
+}
+
+function TenureCell({
+  label,
+  value,
+  accent,
+}: {
+  label: string;
+  value: number;
+  accent: string;
+}) {
+  return (
+    <div className="rounded-md border border-slate-200 px-3 py-2">
+      <p className="text-xs text-slate-500">{label}</p>
+      <p className={`text-xl font-semibold ${accent}`}>{value.toFixed(1)}%</p>
     </div>
   );
 }

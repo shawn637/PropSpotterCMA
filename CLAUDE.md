@@ -92,6 +92,28 @@ POST /api/pdf
   → application/pdf with Content-Disposition: attachment
 ```
 
+## ABS Census tenure integration
+
+`lib/abs/client.ts` + `lib/abs/parse.ts` wrap the ABS 2021 Census G37
+FeatureServer (Tenure and Landlord Type). We query layer 5 (SA1 — the
+finest ABS geographic unit, ~200-800 people) with a point-in-polygon
+spatial query using the subject's lat/lng from HTAG geocode, and
+compute three headline shares: owner-occupier, private rental, public
+housing. Plus a residual `otherPct` for the not-stated / rent-free
+categories.
+
+No auth required (public ArcGIS service). 5 s timeout. Fires in
+parallel with HTAG comparables + market context in `/api/cma` via
+Promise.all; a failing ABS call yields `tenureProfile: null` and the
+valuation renders normally without the tenure card. The narrative
+prompt includes the tenure line so the writer can interpret what the
+mix signals about the pocket (stable family-dominated vs investor-
+heavy vs meaningful public-housing exposure).
+
+Depends on `subject.latitude` / `subject.longitude` being populated.
+HTAG geocode returns coords for most addresses; when it doesn't, the
+tenure leg no-ops cleanly.
+
 ## HTAG integration
 
 `lib/htag/client.ts` is built against the HTAG OpenAPI spec v2.0.0. The

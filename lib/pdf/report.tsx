@@ -350,6 +350,39 @@ export function ValuationReport({
           </View>
         </View>
 
+        {data.tenureProfile && (
+          <>
+            <Text style={styles.sectionHeader}>
+              Neighbourhood tenure (ABS 2021 Census G37 · SA1{' '}
+              {data.tenureProfile.sa1Code})
+            </Text>
+            <View style={styles.kvRow}>
+              <Text style={styles.k}>Owner-occupied</Text>
+              <Text style={styles.v}>
+                {data.tenureProfile.ownerOccupierPct.toFixed(1)}%
+              </Text>
+            </View>
+            <View style={styles.kvRow}>
+              <Text style={styles.k}>Private rental</Text>
+              <Text style={styles.v}>
+                {data.tenureProfile.privateRentalPct.toFixed(1)}%
+              </Text>
+            </View>
+            <View style={styles.kvRow}>
+              <Text style={styles.k}>Public housing</Text>
+              <Text style={styles.v}>
+                {data.tenureProfile.publicHousingPct.toFixed(1)}%
+              </Text>
+            </View>
+            <View style={styles.kvRow}>
+              <Text style={styles.k}>Other / not stated</Text>
+              <Text style={styles.v}>
+                {data.tenureProfile.otherPct.toFixed(1)}%
+              </Text>
+            </View>
+          </>
+        )}
+
         <Text style={styles.sectionHeader}>Adjustments applied</Text>
         <View style={styles.kvRow}>
           <Text style={styles.k}>Cycle stretch</Text>

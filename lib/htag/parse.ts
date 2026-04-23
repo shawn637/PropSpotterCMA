@@ -110,6 +110,10 @@ export interface GeocodeParsed {
   state: string;
   postcode: string;
   fullAddress: string;
+  /** WGS84 decimal degrees. Optional — HTAG's geocode endpoint may or
+   *  may not include them depending on the address record. */
+  latitude?: number;
+  longitude?: number;
 }
 
 export function parseGeocode(
@@ -125,6 +129,21 @@ export function parseGeocode(
   const addressLabel = pickString(row, 'address_label');
   const fullAddress =
     addressLabel ?? buildCanonicalAddress(row, locality, state, postcode);
+  // Accept several coordinate spellings — HTAG's docs say `latitude`/
+  // `longitude` but a couple of live responses have been seen with
+  // `lat`/`lng` or `lat`/`lon`. Nested `geometry.coordinates` is the
+  // GeoJSON convention and is worth trying as a last resort.
+  let latitude = pickNumber(row, 'latitude', 'lat', 'y');
+  let longitude = pickNumber(row, 'longitude', 'lng', 'lon', 'x');
+  if ((latitude == null || longitude == null) && isObject(row.geometry)) {
+    const coords = (row.geometry as Record<string, unknown>).coordinates;
+    if (Array.isArray(coords) && coords.length >= 2) {
+      // GeoJSON is [lng, lat]
+      const [lng, lat] = coords;
+      if (typeof lat === 'number' && Number.isFinite(lat)) latitude = lat;
+      if (typeof lng === 'number' && Number.isFinite(lng)) longitude = lng;
+    }
+  }
   return {
     addressKey,
     locPid,
@@ -132,6 +151,8 @@ export function parseGeocode(
     state,
     postcode,
     fullAddress,
+    latitude,
+    longitude,
   };
 }
 

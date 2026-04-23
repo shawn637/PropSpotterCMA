@@ -5,6 +5,7 @@ import type {
   MarketContext,
   MaxPriceResult,
   PropertyDetails,
+  TenureProfile,
   VendorAssessment,
   VendorMotivation,
   VisionAttributes,
@@ -204,6 +205,7 @@ export async function generateNarrative(args: {
   vendorAssessment: VendorAssessment;
   maxPrice: MaxPriceResult;
   actualDaysOnMarket?: number;
+  tenureProfile?: TenureProfile;
 }): Promise<NarrativeResult> {
   if (!hasApiKey()) return { text: fallbackNarrative(args) };
 
@@ -211,6 +213,10 @@ export async function generateNarrative(args: {
   const subjectVisionLine = subjectVision
     ? `- Subject visual profile (Claude Vision, synthesised across the listing gallery): ${formatVisionForPrompt(subjectVision)}`
     : '- Subject visual profile: not analysed (no photos available)';
+
+  const tenureLine = args.tenureProfile
+    ? `- Neighbourhood tenure (ABS 2021 Census G37, SA1 ${args.tenureProfile.sa1Code}, ${args.tenureProfile.totalDwellings} dwellings): ${args.tenureProfile.ownerOccupierPct.toFixed(1)}% owner-occupied, ${args.tenureProfile.privateRentalPct.toFixed(1)}% private rental, ${args.tenureProfile.publicHousingPct.toFixed(1)}% public housing, ${args.tenureProfile.otherPct.toFixed(1)}% other/not stated`
+    : '- Neighbourhood tenure: not resolved (SA1 lookup unavailable)';
 
   // Up to 8 comp lines so the model can name specific comps in the
   // narrative rather than treating them as a faceless "set". Include
@@ -234,13 +240,14 @@ Paragraph 1: describe the subject property, including its visual profile if prov
 
 Paragraph 2: comment on the COMPARABLE SET. Reference at least two specific comparables by street address and explain what they tell us — e.g. "a renovated single-storey on X Street sold for Y; a dated comparable on Z sold for less." Call out when the vision data shows meaningful differences between subject and comps (renovated kitchen vs dated, pool asymmetry, different landscaping tier). Do not invent condition data — only reference what's supplied in the Data section below.
 
-Paragraph 3: explain the market context (cycle stage, growth, typical days on market vs actual) and the vendor assessment in plain language. Do NOT say "buyers agent" or "buyers agency". Do NOT tell the reader what to pay — describe the three numbers as information the reader can use.
+Paragraph 3: explain the market context (cycle stage, growth, typical days on market vs actual) and the neighbourhood tenure mix (owner-occupier vs private rental vs public housing share — use the SA1 Census figures if provided). Briefly interpret what the tenure mix signals about the pocket: high owner-occupancy usually reads as stable family-dominated; high private rental can read as investor-heavy or transient; meaningful public housing share changes the risk profile. Close with the vendor assessment in plain language. Do NOT say "buyers agent" or "buyers agency". Do NOT tell the reader what to pay — describe the three numbers as information the reader can use.
 
 Paragraph 4: walk through the three numbers (opening offer, target, walk-away max) and what each represents in negotiation terms. Close with a reminder that the reader makes the final decision.
 
 Data:
 - Subject: ${args.subject.fullAddress} (${args.subject.propertyType ?? 'House'}, ${args.subject.bedrooms ?? '?'}BR / ${args.subject.bathrooms ?? '?'}BA / ${args.subject.landAreaSqm ?? '?'}sqm land / ${args.subject.floorAreaSqm ?? '?'}sqm floor)
 ${subjectVisionLine}
+${tenureLine}
 - CMA fair value: $${args.cma.fairValue.toLocaleString()} (range $${args.cma.fairValueLow.toLocaleString()}-$${args.cma.fairValueHigh.toLocaleString()}, dispersion ${(args.cma.dispersion * 100).toFixed(1)}%)
 - Comparables used: ${args.cma.comparables.length}
 - Comparable set:
