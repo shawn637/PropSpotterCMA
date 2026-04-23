@@ -14,14 +14,20 @@ import {
 } from '@/lib/htag/client';
 import {
   assessVendorMotivation,
-  generateNarrative,
+  fallbackNarrative,
   type TokenUsage,
 } from '@/lib/llm/vendor-motivation';
 import { clientKey, rateLimit } from '@/lib/ratelimit';
 import type { FullValuationResult, TenureProfile } from '@/lib/types';
 
 export const runtime = 'nodejs';
-export const maxDuration = 30;
+// 60 s defensive margin. The narrative LLM call has been moved to
+// /api/narrative (fired from the client) so the steady-state /api/cma
+// payload is now HTAG subject + HTAG comps + HTAG market + ABS subject
+// + N-parallel ABS comps + vendor classification LLM — typically
+// 10-15 s. Keeping 60 s here protects against a slow HTAG tier or a
+// large ABS batch.
+export const maxDuration = 60;
 
 const RequestSchema = z.object({
   address: z.string().min(8).max(300),
@@ -179,16 +185,23 @@ export async function POST(req: Request) {
       typicalDaysOnMarket: market.typicalDaysOnMarket,
     });
 
-    const { text: narrative, tokenUsage: narrativeUsage } =
-      await generateNarrative({
-        subject,
-        market,
-        cma,
-        vendorAssessment,
-        maxPrice,
-        actualDaysOnMarket,
-        tenureProfile: subjectTenure ?? undefined,
-      });
+    // Ship a synchronous fallback narrative in this response so the
+    // client has something to render immediately. The LLM-backed
+    // version runs separately via /api/narrative once the page is on
+    // screen — that keeps /api/cma well under Vercel's function
+    // budget (we were hitting 30 s timeouts running the narrative
+    // LLM inline here with the expanded prompt + per-comp ABS legs
+    // stacking). The client's existing mount + post-Vision regen
+    // effects upgrade the prose automatically.
+    const narrative = fallbackNarrative({
+      subject,
+      market,
+      cma,
+      vendorAssessment,
+      maxPrice,
+      actualDaysOnMarket,
+    });
+    const narrativeUsage: TokenUsage | undefined = undefined;
 
     const payload: FullValuationResult = {
       subject,

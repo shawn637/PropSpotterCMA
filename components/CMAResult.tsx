@@ -103,6 +103,12 @@ export function CMAResult({
   const [narrativeError, setNarrativeError] = useState<string | null>(null);
   // True once the post-Vision regeneration has fired, so we don't
   // re-fire it on every re-render.
+  // Two independent guards so the mount regeneration and the post-
+  // Vision regeneration can each fire exactly once without blocking
+  // each other. The mount one swaps the server-shipped fallback
+  // prose for an LLM-backed version; the post-Vision one upgrades it
+  // again once Claude Vision has classified the photos.
+  const narrativeFiredOnMountRef = useRef(false);
   const narrativeRegeneratedRef = useRef(false);
 
   // Client-side toggle state. Keys in this set are comps the user has
@@ -586,14 +592,26 @@ export function CMAResult({
   }, []);
 
   /**
-   * Auto-regenerate the narrative once Vision data lands. Triggered
-   * by visionMap changes rather than inline in analyzeImagesDirect
-   * because we need React to have flushed setVisionMap AND useMemo to
-   * have rebuilt `current` with the fresh visual attrs before we POST
-   * the snapshot — doing it inline would send the pre-Vision `current`
-   * closure and the regenerated prose wouldn't cite any visual
-   * findings. Fires once per session; the manual Regenerate button
-   * handles subsequent edits.
+   * On-mount narrative regeneration. /api/cma ships a fast
+   * synchronous fallback so the route stays inside Vercel's function
+   * budget; the moment the result is on screen we upgrade the prose
+   * with an LLM-backed version that cites specific comps and the ABS
+   * tenure numbers.
+   */
+  useEffect(() => {
+    if (narrativeFiredOnMountRef.current) return;
+    narrativeFiredOnMountRef.current = true;
+    void regenerateNarrative();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /**
+   * Post-Vision narrative regeneration. Watches visionMap rather than
+   * running inline in analyzeImagesDirect so that by the time the
+   * POST fires, React has committed the setVisionMap update and
+   * useMemo has rebuilt `current` with the fresh visual attrs.
+   * Otherwise the auto-regen would close over pre-Vision `current`
+   * and the prose wouldn't cite any visual findings.
    */
   useEffect(() => {
     if (narrativeRegeneratedRef.current) return;

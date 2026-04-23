@@ -357,7 +357,7 @@ function heuristicVendorAssessment(description: string): VendorAssessment {
   };
 }
 
-function fallbackNarrative(args: {
+export function fallbackNarrative(args: {
   subject: PropertyDetails;
   market: MarketContext;
   cma: CMAResult;
