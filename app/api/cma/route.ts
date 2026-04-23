@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { fetchTenureByPoint } from '@/lib/abs/client';
 import { computeCMA } from '@/lib/cma/compute';
 import { computeMaxPrice } from '@/lib/cma/maxprice';
+import { nominatimGeocode } from '@/lib/geocode/nominatim';
 import {
   HtagError,
   getComparables,
@@ -64,7 +65,44 @@ export async function POST(req: Request) {
   const { address, listingDescription, actualDaysOnMarket } = parsed.data;
 
   try {
-    const subjectRaw = await getSubjectProperty(address);
+    let subjectRaw = await getSubjectProperty(address);
+
+    // HTAG's geocode doesn't always return lat/lng depending on the
+    // address record. Without coords, we can't do the point-in-SA1
+    // query. Fall back to OpenStreetMap Nominatim for one shot; it's
+    // the cheapest way to rescue the tenure enrichment when HTAG
+    // comes up short. The fallback is silent (returns null on any
+    // error) and only runs in the one-call case here, comfortably
+    // inside Nominatim's 1-req/sec policy.
+    if (subjectRaw.latitude == null || subjectRaw.longitude == null) {
+      const fallback = await nominatimGeocode(subjectRaw.fullAddress);
+      if (fallback) {
+        console.log(
+          JSON.stringify({
+            tag: 'geocode-fallback',
+            reason: 'htag-missing-coords',
+            source: 'nominatim',
+            address: subjectRaw.suburb + ', ' + subjectRaw.postcode,
+            lat: fallback.latitude,
+            lng: fallback.longitude,
+          }),
+        );
+        subjectRaw = {
+          ...subjectRaw,
+          latitude: fallback.latitude,
+          longitude: fallback.longitude,
+        };
+      } else {
+        console.log(
+          JSON.stringify({
+            tag: 'geocode-fallback',
+            reason: 'nominatim-failed',
+            address: subjectRaw.suburb + ', ' + subjectRaw.postcode,
+          }),
+        );
+      }
+    }
+
     // Fire HTAG comparables + market AND the ABS G37 tenure query for
     // the subject in parallel. The ABS leg is wrapped so it can never
     // reject the whole valuation — a 5 s timeout on the ArcGIS fetch
@@ -76,7 +114,15 @@ export async function POST(req: Request) {
         ? fetchTenureByPoint(subjectRaw.latitude, subjectRaw.longitude).then(
             (r) => r.profile,
           )
-        : Promise.resolve(null);
+        : (() => {
+            console.log(
+              JSON.stringify({
+                tag: 'abs-skip',
+                reason: 'subject-missing-coords',
+              }),
+            );
+            return Promise.resolve(null);
+          })();
     const [comparablesRaw, market, subjectTenure] = await Promise.all([
       getComparables(subjectRaw),
       getMarketContext(subjectRaw),

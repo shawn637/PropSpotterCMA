@@ -692,50 +692,78 @@ export function CMAResult({
         </section>
       </div>
 
-      {data.tenureProfile && (
-        <section className="rounded-lg bg-white border border-slate-200 p-4">
-          <div className="flex items-center justify-between mb-2">
-            <h3 className="text-sm font-semibold text-navy">
-              Neighbourhood tenure
-            </h3>
+      <section className="rounded-lg bg-white border border-slate-200 p-4">
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="text-sm font-semibold text-navy">
+            Neighbourhood tenure (subject)
+          </h3>
+          {data.tenureProfile ? (
             <span className="text-xs text-slate-400">
               ABS 2021 Census · SA1 {data.tenureProfile.sa1Code} ·{' '}
               {data.tenureProfile.totalDwellings} dwellings
             </span>
-          </div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-            <TenureCell
-              label="Owner-occupied"
-              value={data.tenureProfile.ownerOccupierPct}
-              accent="text-teal"
-            />
-            <TenureCell
-              label="Private rental"
-              value={data.tenureProfile.privateRentalPct}
-              accent="text-navy"
-            />
-            <TenureCell
-              label="Public housing"
-              value={data.tenureProfile.publicHousingPct}
-              accent="text-gold"
-            />
-            <TenureCell
-              label="Other / not stated"
-              value={data.tenureProfile.otherPct}
-              accent="text-slate-500"
-            />
-          </div>
-          <p className="mt-2 text-xs text-slate-500">
-            Shares are from the Australian Bureau of Statistics 2021 Census
-            G37 table at the subject&rsquo;s SA1 (Statistical Area Level 1 —
-            the finest ABS unit, typically 200&ndash;800 people). Private
-            rental covers real-estate-agent and other private landlords;
-            public housing covers state/territory and community housing.
-            Shares may not sum to 100% because some dwellings fall in minor
-            categories (rent-free, tenure not stated).
+          ) : (
+            <span className="text-xs text-amber-700">
+              Not resolved — no SA1 match for the subject&rsquo;s coordinates.
+            </span>
+          )}
+        </div>
+        {data.tenureProfile ? (
+          <>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+              <TenureCell
+                label="Owner-occupied"
+                value={data.tenureProfile.ownerOccupierPct}
+                accent="text-teal"
+              />
+              <TenureCell
+                label="Private rental"
+                value={data.tenureProfile.privateRentalPct}
+                accent="text-navy"
+              />
+              <TenureCell
+                label="Public housing"
+                value={data.tenureProfile.publicHousingPct}
+                accent={
+                  data.tenureProfile.publicHousingPct >= 15
+                    ? 'text-red-600'
+                    : data.tenureProfile.publicHousingPct >= 10
+                      ? 'text-amber-600'
+                      : 'text-gold'
+                }
+              />
+              <TenureCell
+                label="Other / not stated"
+                value={data.tenureProfile.otherPct}
+                accent="text-slate-500"
+              />
+            </div>
+            <p className="mt-2 text-xs text-slate-500">
+              Shares are from the Australian Bureau of Statistics 2021 Census
+              G37 table at the subject&rsquo;s SA1 (Statistical Area Level
+              1 — the finest ABS unit, typically 200&ndash;800 people).
+              Private rental covers real-estate-agent and other private
+              landlords; public housing covers state/territory and
+              community housing. The <strong>OO/PR/PH</strong> column in
+              the comparables table below shows the same breakdown for each
+              comp&rsquo;s SA1, coloured amber at ≥10% and red at ≥15%
+              public housing. Shares may not sum to 100% because some
+              dwellings fall in minor categories (rent-free, tenure not
+              stated).
+            </p>
+          </>
+        ) : (
+          <p className="text-xs text-slate-600">
+            The subject&rsquo;s SA1 couldn&rsquo;t be resolved from the
+            available coordinates, so the tenure card and the per-comp
+            tenure adjustment are skipped for this run. Check the Vercel
+            logs for <code>&quot;tag&quot;:&quot;abs-skip&quot;</code> or{' '}
+            <code>&quot;tag&quot;:&quot;geocode-fallback&quot;</code> to
+            see why, or hit <code>/api/abs-debug?address=...</code>{' '}
+            directly to probe the ABS endpoint.
           </p>
-        </section>
-      )}
+        )}
+      </section>
 
       <section className="rounded-lg bg-white border border-slate-200 p-4">
         <h3 className="text-sm font-semibold text-navy mb-2">
@@ -798,6 +826,12 @@ export function CMAResult({
                 <th className="py-1 pr-2 text-right">Land</th>
                 <th className="py-1 pr-2 text-right">Floor</th>
                 <th className="py-1 pr-2">Vision</th>
+                <th
+                  className="py-1 pr-2 text-right"
+                  title="SA1 tenure mix: Owner-occupier / Private rental / Public housing (%)"
+                >
+                  OO/PR/PH
+                </th>
                 <th className="py-1 pr-2 text-right">Sale price</th>
                 <th className="py-1 pr-2 text-right">Date</th>
                 <th className="py-1 pr-2 text-right">Adj.</th>
@@ -838,6 +872,16 @@ export function CMAResult({
                     </td>
                     <td className="py-1 pr-2 text-xs text-slate-600">
                       <VisionBadges attrs={attrs} />
+                    </td>
+                    <td
+                      className="py-1 pr-2 text-right text-xs"
+                      title={
+                        c.tenureProfile
+                          ? `SA1 ${c.tenureProfile.sa1Code} (${c.tenureProfile.totalDwellings} dwellings)`
+                          : 'SA1 tenure not resolved for this comp'
+                      }
+                    >
+                      <TenureInline profile={c.tenureProfile} />
                     </td>
                     <td className="py-1 pr-2 text-right">
                       {currency(c.salePrice)}
@@ -1033,6 +1077,31 @@ function TenureCell({
       <p className="text-xs text-slate-500">{label}</p>
       <p className={`text-xl font-semibold ${accent}`}>{value.toFixed(1)}%</p>
     </div>
+  );
+}
+
+function TenureInline({
+  profile,
+}: {
+  profile?: FullValuationResult['subject']['tenureProfile'];
+}) {
+  if (!profile) return <span className="text-slate-300">—</span>;
+  // Colour the PH share when it crosses the 10% / 15% thresholds Shawn
+  // called out so reviewers can eyeball discounts at a glance.
+  const phClass =
+    profile.publicHousingPct >= 15
+      ? 'text-red-600 font-semibold'
+      : profile.publicHousingPct >= 10
+        ? 'text-amber-600'
+        : 'text-slate-600';
+  return (
+    <span className="tabular-nums">
+      <span className="text-teal">{profile.ownerOccupierPct.toFixed(0)}</span>
+      <span className="text-slate-400">/</span>
+      <span className="text-navy">{profile.privateRentalPct.toFixed(0)}</span>
+      <span className="text-slate-400">/</span>
+      <span className={phClass}>{profile.publicHousingPct.toFixed(0)}</span>
+    </span>
   );
 }
 
