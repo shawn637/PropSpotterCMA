@@ -56,23 +56,20 @@ export async function fetchTenureByPoint(
     y: latitude,
     spatialReference: { wkid: 4326 },
   });
+  // outFields=* rather than a specific field list. The G37 beta layer
+  // uses slightly different field names than the reference doc — e.g.
+  // SA1_CODE21 vs SA1_CODE_2021, counts may be UPPERCASE — and asking
+  // for a non-existent field yields "Cannot perform query. Invalid
+  // query parameters." across every request. Requesting `*` is
+  // documented as supported and the parser copes with field-name
+  // variants via multi-name aliases.
   const params = new URLSearchParams({
     where: '1=1',
     geometry,
     geometryType: 'esriGeometryPoint',
     inSR: '4326',
     spatialRel: 'esriSpatialRelIntersects',
-    outFields: [
-      'SA1_CODE_2021',
-      'Tot_Total',
-      'O_OR_Total',
-      'O_MTG_Total',
-      'R_RE_Agt_Total',
-      'R_Pers_not_in_s_h_Total',
-      'R_Oth_landlord_type_Total',
-      'R_ST_h_auth_Total',
-      'R_Com_Hp_Total',
-    ].join(','),
+    outFields: '*',
     returnGeometry: 'false',
     f: 'json',
   });
@@ -101,16 +98,42 @@ export async function fetchTenureByPoint(
       };
     }
     const json = (await res.json()) as unknown;
-    const profile = parseG37SA1Response(json);
-    logAbs({
-      lat: latitude,
-      lng: longitude,
-      status: res.status,
-      ms: Date.now() - startedAt,
-      sa1: profile?.sa1Code,
-      totalDwellings: profile?.totalDwellings,
-    });
-    return { profile };
+    try {
+      const profile = parseG37SA1Response(json);
+      logAbs({
+        lat: latitude,
+        lng: longitude,
+        status: res.status,
+        ms: Date.now() - startedAt,
+        sa1: profile?.sa1Code,
+        totalDwellings: profile?.totalDwellings,
+      });
+      return { profile };
+    } catch (parseErr) {
+      // Separate branch so we can show the first available field
+      // names from the response — critical when schema drifts and
+      // the lookup aliases need another variant.
+      const reason =
+        parseErr instanceof Error ? parseErr.message : String(parseErr);
+      const firstFeatureKeys =
+        Array.isArray((json as { features?: unknown }).features) &&
+        ((json as { features?: Array<{ attributes?: object }> }).features![0]
+          ?.attributes)
+          ? Object.keys(
+              (json as { features: Array<{ attributes: object }> })
+                .features[0].attributes,
+            ).slice(0, 20)
+          : [];
+      logAbs({
+        lat: latitude,
+        lng: longitude,
+        status: res.status,
+        ms: Date.now() - startedAt,
+        error: reason,
+        firstFeatureKeys,
+      });
+      return { profile: null, error: reason };
+    }
   } catch (err) {
     const aborted =
       err instanceof Error &&
@@ -123,7 +146,7 @@ export async function fetchTenureByPoint(
     logAbs({
       lat: latitude,
       lng: longitude,
-      status: 0,
+      status: -1, // network-layer failure, distinct from ArcGIS 200+error
       ms: Date.now() - startedAt,
       error: reason,
     });
@@ -141,6 +164,7 @@ function logAbs(info: {
   sa1?: string;
   totalDwellings?: number;
   error?: string;
+  firstFeatureKeys?: string[];
 }): void {
   console.log(JSON.stringify({ tag: 'abs-g37', ...info }));
 }

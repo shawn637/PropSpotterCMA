@@ -76,7 +76,7 @@ test('parseG37SA1Response: ArcGIS error envelope → throws', () => {
   assert.throws(() => parseG37SA1Response(response), AbsParseError);
 });
 
-test('parseG37SA1Response: missing SA1_CODE_2021 → throws with key list', () => {
+test('parseG37SA1Response: missing SA1 code → throws with key list', () => {
   const response = {
     features: [
       {
@@ -88,7 +88,7 @@ test('parseG37SA1Response: missing SA1_CODE_2021 → throws with key list', () =
     () => parseG37SA1Response(response),
     (err: unknown) =>
       err instanceof AbsParseError &&
-      err.message.includes('SA1_CODE_2021') &&
+      err.message.includes('SA1') &&
       err.message.includes('Tot_Total'),
   );
 });
