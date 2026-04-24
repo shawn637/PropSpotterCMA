@@ -18,20 +18,46 @@ import { queryWithCandidates } from '@/lib/risk/arcgis';
 import type { HazardLayerResult, HazardLevel } from '@/lib/types';
 
 // Bushfire-Prone Land candidate endpoints. NSW RFS publishes via
-// NSW Planning Portal's hazards services.
-const BUSHFIRE_CANDIDATES = [
+// NSW Planning Portal's hazards services. The URLs below are
+// educated guesses — none have been verified against live ArcGIS.
+// Override via env var NSW_BUSHFIRE_URLS (comma-separated) once
+// /api/risk-debug?state=nsw&pattern=bushfire pins the real ones.
+const DEFAULT_BUSHFIRE_CANDIDATES = [
   'https://mapprod3.environment.nsw.gov.au/arcgis/rest/services/ePlanning/Planning_Portal_Hazards/MapServer/229/query',
   'https://mapprod1.environment.nsw.gov.au/arcgis/rest/services/ePlanning/Planning_Portal_Hazards/MapServer/229/query',
   'https://portal.spatial.nsw.gov.au/server/rest/services/NSW_BushFire_Prone_Land/FeatureServer/0/query',
   'https://mapprod3.environment.nsw.gov.au/arcgis/rest/services/Planning/Planning_Portal_Hazards/MapServer/0/query',
 ];
 
-// Flood Planning Area candidate endpoints.
-const FLOOD_CANDIDATES = [
+// Flood Planning Area candidate endpoints. Same override semantics
+// via NSW_FLOOD_URLS.
+const DEFAULT_FLOOD_CANDIDATES = [
   'https://mapprod3.environment.nsw.gov.au/arcgis/rest/services/ePlanning/Planning_Portal_Hazards/MapServer/230/query',
   'https://mapprod1.environment.nsw.gov.au/arcgis/rest/services/ePlanning/Planning_Portal_Hazards/MapServer/230/query',
   'https://portal.spatial.nsw.gov.au/server/rest/services/NSW_FloodPlain/FeatureServer/0/query',
 ];
+
+function bushfireCandidates(): string[] {
+  const override = process.env.NSW_BUSHFIRE_URLS;
+  if (override) {
+    return override
+      .split(',')
+      .map((u) => u.trim())
+      .filter((u) => u.length > 0);
+  }
+  return DEFAULT_BUSHFIRE_CANDIDATES;
+}
+
+function floodCandidates(): string[] {
+  const override = process.env.NSW_FLOOD_URLS;
+  if (override) {
+    return override
+      .split(',')
+      .map((u) => u.trim())
+      .filter((u) => u.length > 0);
+  }
+  return DEFAULT_FLOOD_CANDIDATES;
+}
 
 const ATTRIBUTION_BUSHFIRE = {
   publisher: 'NSW Rural Fire Service / NSW Planning Portal',
@@ -61,7 +87,7 @@ async function fetchBushfire(
   longitude: number,
 ): Promise<HazardLayerResult> {
   const res = await queryWithCandidates({
-    urls: BUSHFIRE_CANDIDATES,
+    urls: bushfireCandidates(),
     latitude,
     longitude,
   });
@@ -115,7 +141,7 @@ async function fetchFlood(
   longitude: number,
 ): Promise<HazardLayerResult> {
   const res = await queryWithCandidates({
-    urls: FLOOD_CANDIDATES,
+    urls: floodCandidates(),
     latitude,
     longitude,
   });
