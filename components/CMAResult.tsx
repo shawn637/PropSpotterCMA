@@ -800,72 +800,96 @@ export function CMAResult({
         )}
       </section>
 
-      {data.seifaProfile && (
-        <section className="rounded-lg bg-white border border-slate-200 p-4">
-          <div className="flex items-center justify-between mb-2">
-            <h3 className="text-sm font-semibold text-navy">
-              SEIFA socio-economic indexes
-            </h3>
+      <section className="rounded-lg bg-white border border-slate-200 p-4">
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="text-sm font-semibold text-navy">
+            SEIFA socio-economic indexes
+          </h3>
+          {data.seifaProfile ? (
             <span className="text-xs text-slate-400">
               ABS 2021 · SA1 {data.seifaProfile.sa1Code} · national deciles
             </span>
-          </div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
-            <SeifaCell
-              label="IRSD (disadvantage)"
-              decile={data.seifaProfile.irsd.decileAus}
-              score={data.seifaProfile.irsd.score}
-              interpretation={irsdInterpretation(
-                data.seifaProfile.irsd.decileAus,
-              )}
-            />
-            <SeifaCell
-              label="IRSAD (adv + disadv)"
-              decile={data.seifaProfile.irsad.decileAus}
-              score={data.seifaProfile.irsad.score}
-              interpretation={advantageInterpretation(
-                data.seifaProfile.irsad.decileAus,
-              )}
-            />
-            <SeifaCell
-              label="IER (econ resources)"
-              decile={data.seifaProfile.ier.decileAus}
-              score={data.seifaProfile.ier.score}
-              interpretation={advantageInterpretation(
-                data.seifaProfile.ier.decileAus,
-              )}
-            />
-            <SeifaCell
-              label="IEO (edu & occ)"
-              decile={data.seifaProfile.ieo.decileAus}
-              score={data.seifaProfile.ieo.score}
-              interpretation={advantageInterpretation(
-                data.seifaProfile.ieo.decileAus,
-              )}
-            />
-          </div>
-          <p className="mt-2 text-xs text-slate-500">
-            SEIFA scores are ABS 2021 Census socio-economic indexes at
-            SA1 granularity. Higher deciles mean more advantaged;
-            IRSAD ≥8 is upper-tier, 5&ndash;7 is typical middle
-            suburbia, ≤4 flags disadvantage. Watch for divergence:
-            high IEO (education/occupation) with lower IRSAD can
-            signal a gentrifying pocket as professional households
-            move in ahead of the broader index catching up.
+          ) : (
+            <span className="text-xs text-amber-700">
+              Not resolved — ABS SEIFA lookup failed or returned empty.
+            </span>
+          )}
+        </div>
+        {data.seifaProfile ? (
+          <>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+              <SeifaCell
+                label="IRSD (disadvantage)"
+                decile={data.seifaProfile.irsd.decileAus}
+                score={data.seifaProfile.irsd.score}
+                interpretation={irsdInterpretation(
+                  data.seifaProfile.irsd.decileAus,
+                )}
+              />
+              <SeifaCell
+                label="IRSAD (adv + disadv)"
+                decile={data.seifaProfile.irsad.decileAus}
+                score={data.seifaProfile.irsad.score}
+                interpretation={advantageInterpretation(
+                  data.seifaProfile.irsad.decileAus,
+                )}
+              />
+              <SeifaCell
+                label="IER (econ resources)"
+                decile={data.seifaProfile.ier.decileAus}
+                score={data.seifaProfile.ier.score}
+                interpretation={advantageInterpretation(
+                  data.seifaProfile.ier.decileAus,
+                )}
+              />
+              <SeifaCell
+                label="IEO (edu & occ)"
+                decile={data.seifaProfile.ieo.decileAus}
+                score={data.seifaProfile.ieo.score}
+                interpretation={advantageInterpretation(
+                  data.seifaProfile.ieo.decileAus,
+                )}
+              />
+            </div>
+            <p className="mt-2 text-xs text-slate-500">
+              SEIFA scores are ABS 2021 Census socio-economic indexes at
+              SA1 granularity. Higher deciles mean more advantaged;
+              IRSAD ≥8 is upper-tier, 5&ndash;7 is typical middle
+              suburbia, ≤4 flags disadvantage. Watch for divergence:
+              high IEO (education/occupation) with lower IRSAD can
+              signal a gentrifying pocket as professional households
+              move in ahead of the broader index catching up.
+            </p>
+          </>
+        ) : (
+          <p className="text-xs text-slate-600">
+            The SEIFA ArcGIS service didn&rsquo;t return usable data
+            for this SA1. Check Vercel logs for{' '}
+            <code>&quot;tag&quot;:&quot;abs-seifa&quot;</code> — the
+            <code>firstFeatureKeys</code> field will show what fields
+            the layer actually returned so a parser alias can be
+            added. Hit{' '}
+            <code>/api/abs-debug?address=...</code> to probe directly.
           </p>
-        </section>
-      )}
+        )}
+      </section>
 
-      {data.demographics && (
-        <section className="rounded-lg bg-white border border-slate-200 p-4">
-          <div className="flex items-center justify-between mb-2">
-            <h3 className="text-sm font-semibold text-navy">
-              Demographics (ABS 2021 Census G02)
-            </h3>
+      <section className="rounded-lg bg-white border border-slate-200 p-4">
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="text-sm font-semibold text-navy">
+            Demographics (ABS 2021 Census G02)
+          </h3>
+          {data.demographics ? (
             <span className="text-xs text-slate-400">
               SA1 {data.demographics.sa1Code} medians
             </span>
-          </div>
+          ) : (
+            <span className="text-xs text-amber-700">
+              Not resolved — ABS G02 lookup failed or returned empty.
+            </span>
+          )}
+        </div>
+        {data.demographics ? (
           <dl className="grid grid-cols-2 md:grid-cols-3 gap-y-1 text-sm">
             <DemoCell
               label="Median age"
@@ -916,8 +940,19 @@ export function CMAResult({
               }
             />
           </dl>
-        </section>
-      )}
+        ) : (
+          <p className="text-xs text-slate-600">
+            The G02 ArcGIS service didn&rsquo;t return usable data for
+            this SA1. Check Vercel logs for{' '}
+            <code>&quot;tag&quot;:&quot;abs-g02&quot;</code> to see
+            whether it&rsquo;s a 404 on the service URL, an
+            &ldquo;Invalid query parameters&rdquo; schema-drift error
+            (the <code>firstFeatureKeys</code> field lists what the
+            layer actually returned), or a timeout. Hit{' '}
+            <code>/api/abs-debug?address=...</code> to probe directly.
+          </p>
+        )}
+      </section>
 
       <section className="rounded-lg bg-white border border-slate-200 p-4">
         <h3 className="text-sm font-semibold text-navy mb-2">
