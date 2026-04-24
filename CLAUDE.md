@@ -114,6 +114,31 @@ Depends on `subject.latitude` / `subject.longitude` being populated.
 HTAG geocode returns coords for most addresses; when it doesn't, the
 tenure leg no-ops cleanly.
 
+## ABS SEIFA + G02 enrichment (Release 1 of the investment-tool plan)
+
+`lib/abs/seifa.ts` and `lib/abs/g02.ts` mirror the G37 pattern
+against two additional ABS ArcGIS services at SA1 granularity. All
+three fire in parallel from `/api/cma` and are independently wrapped
+so any single ABS service being slow or schema-drifted can't break
+the valuation.
+
+- **SEIFA** (`services-ap1` host, `/FeatureServer/0`, single-layer
+  service already scoped to SA1 by name). Returns IRSD, IRSAD, IER,
+  IEO scores + national deciles. UI renders colour-coded deciles
+  (red 1-3, amber 4, teal 8-10); narrative prompt instructs the
+  writer to call out IRSAD/IEO divergence as a gentrification
+  signal.
+- **G02** (`services1` host, `/FeatureServer/5` like G37). Surfaces
+  median age, median personal / household income weekly, median rent
+  weekly, median mortgage monthly, average household size. Used in
+  the narrative to cross-check affordability.
+
+Diagnostic: `/api/abs-debug?address=...` fires all three legs in
+parallel and returns each profile + per-leg error, so schema drift
+is diagnosable in one request.
+
+Log tags: `abs-seifa`, `abs-g02` (alongside existing `abs-g37`).
+
 ## HTAG integration
 
 `lib/htag/client.ts` is built against the HTAG OpenAPI spec v2.0.0. The

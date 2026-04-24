@@ -383,6 +383,113 @@ export function ValuationReport({
           </>
         )}
 
+        {data.seifaProfile && (
+          <>
+            <Text style={styles.sectionHeader}>
+              SEIFA (ABS 2021 · national deciles, 1 disadvantaged →
+              10 advantaged)
+            </Text>
+            <View style={styles.kvRow}>
+              <Text style={styles.k}>IRSD (disadvantage)</Text>
+              <Text style={styles.v}>
+                {data.seifaProfile.irsd.decileAus}/10 (score{' '}
+                {data.seifaProfile.irsd.score || '—'})
+              </Text>
+            </View>
+            <View style={styles.kvRow}>
+              <Text style={styles.k}>IRSAD (advantage & disadv.)</Text>
+              <Text style={styles.v}>
+                {data.seifaProfile.irsad.decileAus}/10 (score{' '}
+                {data.seifaProfile.irsad.score || '—'})
+              </Text>
+            </View>
+            <View style={styles.kvRow}>
+              <Text style={styles.k}>IER (economic resources)</Text>
+              <Text style={styles.v}>
+                {data.seifaProfile.ier.decileAus}/10 (score{' '}
+                {data.seifaProfile.ier.score || '—'})
+              </Text>
+            </View>
+            <View style={styles.kvRow}>
+              <Text style={styles.k}>IEO (education & occupation)</Text>
+              <Text style={styles.v}>
+                {data.seifaProfile.ieo.decileAus}/10 (score{' '}
+                {data.seifaProfile.ieo.score || '—'})
+              </Text>
+            </View>
+          </>
+        )}
+
+        {data.demographics && (
+          <>
+            <Text style={styles.sectionHeader}>
+              Demographics (ABS 2021 Census G02 · SA1 medians)
+            </Text>
+            {data.demographics.medianAge != null && (
+              <View style={styles.kvRow}>
+                <Text style={styles.k}>Median age</Text>
+                <Text style={styles.v}>
+                  {data.demographics.medianAge} yrs
+                </Text>
+              </View>
+            )}
+            {data.demographics.averageHouseholdSize != null && (
+              <View style={styles.kvRow}>
+                <Text style={styles.k}>Avg household size</Text>
+                <Text style={styles.v}>
+                  {data.demographics.averageHouseholdSize.toFixed(1)}
+                </Text>
+              </View>
+            )}
+            {data.demographics.medianPersonalIncomeWeekly != null && (
+              <View style={styles.kvRow}>
+                <Text style={styles.k}>Median personal income</Text>
+                <Text style={styles.v}>
+                  $
+                  {data.demographics.medianPersonalIncomeWeekly.toLocaleString(
+                    'en-AU',
+                  )}
+                  /wk
+                </Text>
+              </View>
+            )}
+            {data.demographics.medianHouseholdIncomeWeekly != null && (
+              <View style={styles.kvRow}>
+                <Text style={styles.k}>Median household income</Text>
+                <Text style={styles.v}>
+                  $
+                  {data.demographics.medianHouseholdIncomeWeekly.toLocaleString(
+                    'en-AU',
+                  )}
+                  /wk
+                </Text>
+              </View>
+            )}
+            {data.demographics.medianRentWeekly != null && (
+              <View style={styles.kvRow}>
+                <Text style={styles.k}>Median rent</Text>
+                <Text style={styles.v}>
+                  $
+                  {data.demographics.medianRentWeekly.toLocaleString('en-AU')}
+                  /wk
+                </Text>
+              </View>
+            )}
+            {data.demographics.medianMortgageMonthly != null && (
+              <View style={styles.kvRow}>
+                <Text style={styles.k}>Median mortgage</Text>
+                <Text style={styles.v}>
+                  $
+                  {data.demographics.medianMortgageMonthly.toLocaleString(
+                    'en-AU',
+                  )}
+                  /mo
+                </Text>
+              </View>
+            )}
+          </>
+        )}
+
         <Text style={styles.sectionHeader}>Adjustments applied</Text>
         <View style={styles.kvRow}>
           <Text style={styles.k}>Cycle stretch</Text>

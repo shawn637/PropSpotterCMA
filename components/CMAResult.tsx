@@ -800,6 +800,125 @@ export function CMAResult({
         )}
       </section>
 
+      {data.seifaProfile && (
+        <section className="rounded-lg bg-white border border-slate-200 p-4">
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="text-sm font-semibold text-navy">
+              SEIFA socio-economic indexes
+            </h3>
+            <span className="text-xs text-slate-400">
+              ABS 2021 · SA1 {data.seifaProfile.sa1Code} · national deciles
+            </span>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+            <SeifaCell
+              label="IRSD (disadvantage)"
+              decile={data.seifaProfile.irsd.decileAus}
+              score={data.seifaProfile.irsd.score}
+              interpretation={irsdInterpretation(
+                data.seifaProfile.irsd.decileAus,
+              )}
+            />
+            <SeifaCell
+              label="IRSAD (adv + disadv)"
+              decile={data.seifaProfile.irsad.decileAus}
+              score={data.seifaProfile.irsad.score}
+              interpretation={advantageInterpretation(
+                data.seifaProfile.irsad.decileAus,
+              )}
+            />
+            <SeifaCell
+              label="IER (econ resources)"
+              decile={data.seifaProfile.ier.decileAus}
+              score={data.seifaProfile.ier.score}
+              interpretation={advantageInterpretation(
+                data.seifaProfile.ier.decileAus,
+              )}
+            />
+            <SeifaCell
+              label="IEO (edu & occ)"
+              decile={data.seifaProfile.ieo.decileAus}
+              score={data.seifaProfile.ieo.score}
+              interpretation={advantageInterpretation(
+                data.seifaProfile.ieo.decileAus,
+              )}
+            />
+          </div>
+          <p className="mt-2 text-xs text-slate-500">
+            SEIFA scores are ABS 2021 Census socio-economic indexes at
+            SA1 granularity. Higher deciles mean more advantaged;
+            IRSAD ≥8 is upper-tier, 5&ndash;7 is typical middle
+            suburbia, ≤4 flags disadvantage. Watch for divergence:
+            high IEO (education/occupation) with lower IRSAD can
+            signal a gentrifying pocket as professional households
+            move in ahead of the broader index catching up.
+          </p>
+        </section>
+      )}
+
+      {data.demographics && (
+        <section className="rounded-lg bg-white border border-slate-200 p-4">
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="text-sm font-semibold text-navy">
+              Demographics (ABS 2021 Census G02)
+            </h3>
+            <span className="text-xs text-slate-400">
+              SA1 {data.demographics.sa1Code} medians
+            </span>
+          </div>
+          <dl className="grid grid-cols-2 md:grid-cols-3 gap-y-1 text-sm">
+            <DemoCell
+              label="Median age"
+              value={
+                data.demographics.medianAge != null
+                  ? `${data.demographics.medianAge} yrs`
+                  : '—'
+              }
+            />
+            <DemoCell
+              label="Avg household size"
+              value={
+                data.demographics.averageHouseholdSize != null
+                  ? data.demographics.averageHouseholdSize.toFixed(1)
+                  : '—'
+              }
+            />
+            <DemoCell
+              label="Median personal income"
+              value={
+                data.demographics.medianPersonalIncomeWeekly != null
+                  ? `$${data.demographics.medianPersonalIncomeWeekly.toLocaleString('en-AU')}/wk`
+                  : '—'
+              }
+            />
+            <DemoCell
+              label="Median household income"
+              value={
+                data.demographics.medianHouseholdIncomeWeekly != null
+                  ? `$${data.demographics.medianHouseholdIncomeWeekly.toLocaleString('en-AU')}/wk`
+                  : '—'
+              }
+            />
+            <DemoCell
+              label="Median rent"
+              value={
+                data.demographics.medianRentWeekly != null
+                  ? `$${data.demographics.medianRentWeekly.toLocaleString('en-AU')}/wk`
+                  : '—'
+              }
+            />
+            <DemoCell
+              label="Median mortgage"
+              value={
+                data.demographics.medianMortgageMonthly != null
+                  ? `$${data.demographics.medianMortgageMonthly.toLocaleString('en-AU')}/mo`
+                  : '—'
+              }
+            />
+          </dl>
+        </section>
+      )}
+
       <section className="rounded-lg bg-white border border-slate-200 p-4">
         <h3 className="text-sm font-semibold text-navy mb-2">
           Adjustments applied
@@ -1139,6 +1258,69 @@ function TenureCell({
       <p className={`text-xl font-semibold ${accent}`}>{value.toFixed(1)}%</p>
     </div>
   );
+}
+
+function SeifaCell({
+  label,
+  decile,
+  score,
+  interpretation,
+}: {
+  label: string;
+  decile: number;
+  score: number;
+  interpretation: { colour: string; word: string };
+}) {
+  return (
+    <div className="rounded-md border border-slate-200 px-3 py-2">
+      <p className="text-xs text-slate-500">{label}</p>
+      <p className={`text-xl font-semibold ${interpretation.colour}`}>
+        {decile > 0 ? `${decile}/10` : '—'}
+      </p>
+      <p className="text-xs text-slate-500 mt-0.5">
+        score {score || '—'} · {interpretation.word}
+      </p>
+    </div>
+  );
+}
+
+function DemoCell({ label, value }: { label: string; value: string }) {
+  return (
+    <>
+      <dt className="text-slate-500 text-sm">{label}</dt>
+      <dd className="text-sm">{value}</dd>
+    </>
+  );
+}
+
+/**
+ * IRSD is a disadvantage-only index — higher decile = less
+ * disadvantaged. Low deciles (1-3) warrant a red flag; 4-6 mixed;
+ * 7+ reads as not-disadvantaged.
+ */
+function irsdInterpretation(decile: number): {
+  colour: string;
+  word: string;
+} {
+  if (decile <= 0) return { colour: 'text-slate-400', word: 'n/a' };
+  if (decile <= 3) return { colour: 'text-red-600', word: 'disadvantaged' };
+  if (decile <= 6) return { colour: 'text-amber-600', word: 'mixed' };
+  return { colour: 'text-teal', word: 'not disadvantaged' };
+}
+
+/**
+ * IRSAD / IER / IEO are all advantage-direction indexes: 1 = bottom
+ * tier, 10 = top tier. 8+ signals established upper-tier pocket,
+ * 5-7 typical middle suburbia, 1-4 lower SES.
+ */
+function advantageInterpretation(decile: number): {
+  colour: string;
+  word: string;
+} {
+  if (decile <= 0) return { colour: 'text-slate-400', word: 'n/a' };
+  if (decile >= 8) return { colour: 'text-teal', word: 'upper tier' };
+  if (decile >= 5) return { colour: 'text-navy', word: 'middle' };
+  return { colour: 'text-amber-600', word: 'lower tier' };
 }
 
 function TenureInline({

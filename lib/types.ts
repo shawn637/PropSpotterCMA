@@ -204,6 +204,14 @@ export interface FullValuationResult {
    *  the valuation renders without it if the ABS FeatureServer is
    *  unreachable or we couldn't resolve an SA1 for the subject. */
   tenureProfile?: TenureProfile;
+  /** ABS 2021 SEIFA scores and deciles at the subject's SA1. Socio-
+   *  economic indexes — the strongest single "is this pocket rising
+   *  or falling" signal in Australian property research. */
+  seifaProfile?: SeifaProfile;
+  /** ABS 2021 Census G02 demographic medians at the subject's SA1.
+   *  Median income / rent / mortgage / household size. Feeds the
+   *  "can the typical household here afford the price" check. */
+  demographics?: G02Demographics;
 }
 
 export interface CMARequest {
@@ -230,4 +238,47 @@ export interface TenureProfile {
   privateRentalPct: number;
   publicHousingPct: number;
   otherPct: number;
+}
+
+/**
+ * ABS 2021 SEIFA (Socio-Economic Indexes for Areas) at SA1.
+ * Higher score = more advantaged. Deciles are national, 1 (most
+ * disadvantaged) → 10 (most advantaged); state-level deciles have
+ * the same rank scale against a smaller pool. Scores hover around
+ * 1000 (national mean).
+ *
+ *   IRSD  = Index of Relative Socio-economic Disadvantage — only
+ *           captures disadvantage (low-income, unemployment, no-car,
+ *           crowding). Useful for risk screening.
+ *   IRSAD = …Advantage and Disadvantage — two-sided index; rising
+ *           deciles signal gentrification or already-established
+ *           upper-tier areas.
+ *   IER   = Index of Economic Resources — income + mortgage/rent
+ *           burden + wealth proxies. Tracks spending power.
+ *   IEO   = Index of Education and Occupation — degree-holders and
+ *           professional/managerial shares. Leading indicator for
+ *           long-run price growth.
+ */
+export interface SeifaProfile {
+  sa1Code: string;
+  irsd: { score: number; decileAus: number };
+  irsad: { score: number; decileAus: number };
+  ier: { score: number; decileAus: number };
+  ieo: { score: number; decileAus: number };
+}
+
+/**
+ * ABS 2021 Census G02 "Selected Medians and Averages" at SA1.
+ * Only the fields that move investment decisions are surfaced;
+ * additional G02 columns exist but add noise without signal for
+ * valuation work. Weekly values in dollars.
+ */
+export interface G02Demographics {
+  sa1Code: string;
+  medianAge?: number;
+  medianHouseholdIncomeWeekly?: number;
+  medianPersonalIncomeWeekly?: number;
+  medianRentWeekly?: number;
+  medianMortgageMonthly?: number;
+  averageHouseholdSize?: number;
 }

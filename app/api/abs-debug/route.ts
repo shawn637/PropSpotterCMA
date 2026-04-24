@@ -1,6 +1,8 @@
 import { NextResponse } from 'next/server';
 
 import { fetchTenureByPoint } from '@/lib/abs/client';
+import { fetchG02ByPoint } from '@/lib/abs/g02';
+import { fetchSeifaByPoint } from '@/lib/abs/seifa';
 import { nominatimGeocode } from '@/lib/geocode/nominatim';
 
 export const runtime = 'nodejs';
@@ -72,11 +74,28 @@ export async function GET(req: Request) {
     );
   }
 
-  const result = await fetchTenureByPoint(latitude, longitude);
+  // Fire all three ABS legs in parallel and hand the operator a
+  // single blob to eyeball. Makes schema-drift diagnosis one request
+  // instead of three.
+  const [tenure, seifa, g02] = await Promise.all([
+    fetchTenureByPoint(latitude, longitude),
+    fetchSeifaByPoint(latitude, longitude),
+    fetchG02ByPoint(latitude, longitude),
+  ]);
   return NextResponse.json({
     input: { address, lat: latitude, lng: longitude },
     source,
-    profile: result.profile,
-    error: result.error,
+    tenure: {
+      profile: tenure.profile,
+      error: tenure.error,
+    },
+    seifa: {
+      profile: seifa.profile,
+      error: seifa.error,
+    },
+    g02: {
+      demographics: g02.demographics,
+      error: g02.error,
+    },
   });
 }

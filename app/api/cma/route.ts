@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 import { z } from 'zod';
 
 import { fetchTenureByPoint } from '@/lib/abs/client';
+import { fetchG02ByPoint } from '@/lib/abs/g02';
+import { fetchSeifaByPoint } from '@/lib/abs/seifa';
 import { computeCMA } from '@/lib/cma/compute';
 import { computeMaxPrice } from '@/lib/cma/maxprice';
 import { nominatimGeocode } from '@/lib/geocode/nominatim';
@@ -18,7 +20,12 @@ import {
   type TokenUsage,
 } from '@/lib/llm/vendor-motivation';
 import { clientKey, rateLimit } from '@/lib/ratelimit';
-import type { FullValuationResult, TenureProfile } from '@/lib/types';
+import type {
+  FullValuationResult,
+  G02Demographics,
+  SeifaProfile,
+  TenureProfile,
+} from '@/lib/types';
 
 export const runtime = 'nodejs';
 // 60 s defensive margin. The narrative LLM call has been moved to
@@ -115,25 +122,45 @@ export async function POST(req: Request) {
     // plus a .catch boundary here means a slow ABS response is
     // capped at 5 s of added wall time and always yields null rather
     // than a thrown error.
-    const subjectTenurePromise: Promise<TenureProfile | null> =
-      subjectRaw.latitude != null && subjectRaw.longitude != null
-        ? fetchTenureByPoint(subjectRaw.latitude, subjectRaw.longitude).then(
-            (r) => r.profile,
-          )
-        : (() => {
-            console.log(
-              JSON.stringify({
-                tag: 'abs-skip',
-                reason: 'subject-missing-coords',
-              }),
-            );
-            return Promise.resolve(null);
-          })();
-    const [comparablesRaw, market, subjectTenure] = await Promise.all([
-      getComparables(subjectRaw),
-      getMarketContext(subjectRaw),
-      subjectTenurePromise.catch(() => null),
-    ]);
+    // The three ABS legs (G37 tenure, SEIFA, G02) share the same
+    // lat/lng input and all fire in parallel with HTAG. None is on
+    // the valuation critical path — each is independently wrapped so
+    // one ABS service being slow, throttled, or schema-drifted can't
+    // break the overall CMA response.
+    const hasCoords =
+      subjectRaw.latitude != null && subjectRaw.longitude != null;
+    if (!hasCoords) {
+      console.log(
+        JSON.stringify({
+          tag: 'abs-skip',
+          reason: 'subject-missing-coords',
+        }),
+      );
+    }
+    const subjectTenurePromise: Promise<TenureProfile | null> = hasCoords
+      ? fetchTenureByPoint(subjectRaw.latitude!, subjectRaw.longitude!).then(
+          (r) => r.profile,
+        )
+      : Promise.resolve(null);
+    const subjectSeifaPromise: Promise<SeifaProfile | null> = hasCoords
+      ? fetchSeifaByPoint(subjectRaw.latitude!, subjectRaw.longitude!).then(
+          (r) => r.profile,
+        )
+      : Promise.resolve(null);
+    const subjectG02Promise: Promise<G02Demographics | null> = hasCoords
+      ? fetchG02ByPoint(subjectRaw.latitude!, subjectRaw.longitude!).then(
+          (r) => r.demographics,
+        )
+      : Promise.resolve(null);
+
+    const [comparablesRaw, market, subjectTenure, subjectSeifa, subjectG02] =
+      await Promise.all([
+        getComparables(subjectRaw),
+        getMarketContext(subjectRaw),
+        subjectTenurePromise.catch(() => null),
+        subjectSeifaPromise.catch(() => null),
+        subjectG02Promise.catch(() => null),
+      ]);
     const subject: typeof subjectRaw = {
       ...subjectRaw,
       tenureProfile: subjectTenure ?? undefined,
@@ -215,6 +242,8 @@ export async function POST(req: Request) {
       requestedAddress: address,
       actualDaysOnMarket,
       tenureProfile: subjectTenure ?? undefined,
+      seifaProfile: subjectSeifa ?? undefined,
+      demographics: subjectG02 ?? undefined,
     };
 
     // How many comps had their per-SA1 tenure resolved, plus the
@@ -253,6 +282,21 @@ export async function POST(req: Request) {
             ownerOccupier: subjectTenure.ownerOccupierPct,
             privateRental: subjectTenure.privateRentalPct,
             publicHousing: subjectTenure.publicHousingPct,
+          }
+        : null,
+      seifa: subjectSeifa
+        ? {
+            irsdDecile: subjectSeifa.irsd.decileAus,
+            irsadDecile: subjectSeifa.irsad.decileAus,
+            ierDecile: subjectSeifa.ier.decileAus,
+            ieoDecile: subjectSeifa.ieo.decileAus,
+          }
+        : null,
+      demographics: subjectG02
+        ? {
+            medianHhdInc: subjectG02.medianHouseholdIncomeWeekly,
+            medianRent: subjectG02.medianRentWeekly,
+            medianMortgage: subjectG02.medianMortgageMonthly,
           }
         : null,
       compsTenureCoverage: {
@@ -330,6 +374,17 @@ function logValuation(info: {
     ownerOccupier: number;
     privateRental: number;
     publicHousing: number;
+  } | null;
+  seifa: {
+    irsdDecile: number;
+    irsadDecile: number;
+    ierDecile: number;
+    ieoDecile: number;
+  } | null;
+  demographics: {
+    medianHhdInc?: number;
+    medianRent?: number;
+    medianMortgage?: number;
   } | null;
   compsTenureCoverage: {
     total: number;
