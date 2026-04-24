@@ -166,11 +166,19 @@ export function parseSeifaResponse(response: unknown): SeifaProfile | null {
 
   const sa1Code = pickString(
     attrs,
+    // Live layer uses lowercase (sa1_code_2021) per the field dump
+    // we captured via /api/abs-debug. Keep the PascalCase variants
+    // listed first since a future ABS re-release could flip back.
     'SA1_CODE_2021',
     'SA1_CODE21',
     'SA1_CODE',
     'SA1_MAINCODE_2021',
     'SA1_MAIN_2021',
+    'sa1_code_2021',
+    'sa1_code21',
+    'sa1_code',
+    'sa1_maincode_2021',
+    'sa1_main_2021',
   );
   if (!sa1Code) {
     throw new SeifaParseError(
@@ -178,25 +186,39 @@ export function parseSeifaResponse(response: unknown): SeifaProfile | null {
     );
   }
 
-  const index = (prefix: string) => ({
-    score:
-      pickNumber(
-        attrs,
-        `${prefix}_Score`,
-        `${prefix}_SCORE`,
-        `${prefix}Score`,
-        prefix,
-      ) ?? 0,
-    decileAus:
-      pickNumber(
-        attrs,
-        `${prefix}_Decile_Aust`,
-        `${prefix}_DECILE_AUS`,
-        `${prefix}_Decile_AUST`,
-        `${prefix}_Decile`,
-        `${prefix}_DECILE`,
-      ) ?? 0,
-  });
+  const index = (prefix: string) => {
+    const lower = prefix.toLowerCase();
+    return {
+      score:
+        pickNumber(
+          attrs,
+          // PascalCase variants
+          `${prefix}_Score`,
+          `${prefix}_SCORE`,
+          `${prefix}Score`,
+          prefix,
+          // lowercase variants (live layer)
+          `${lower}_score`,
+          `${lower}score`,
+          lower,
+        ) ?? 0,
+      decileAus:
+        pickNumber(
+          attrs,
+          // PascalCase variants
+          `${prefix}_Decile_Aust`,
+          `${prefix}_DECILE_AUS`,
+          `${prefix}_Decile_AUST`,
+          `${prefix}_Decile`,
+          `${prefix}_DECILE`,
+          // lowercase variants (live layer uses <index>_aus_decile)
+          `${lower}_aus_decile`,
+          `${lower}_decile_aus`,
+          `${lower}_decile_aust`,
+          `${lower}_decile`,
+        ) ?? 0,
+    };
+  };
 
   const irsd = index('IRSD');
   const irsad = index('IRSAD');
