@@ -955,6 +955,52 @@ export function CMAResult({
       </section>
 
       <section className="rounded-lg bg-white border border-slate-200 p-4">
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="text-sm font-semibold text-navy">
+            Hazard &amp; risk overlays
+          </h3>
+          {data.riskProfile ? (
+            data.riskProfile.provider ? (
+              <span className="text-xs text-slate-400">
+                {data.riskProfile.state} state providers
+              </span>
+            ) : (
+              <span className="text-xs text-amber-700">
+                No provider yet for {data.riskProfile.state} — NSW
+                shipped; VIC/QLD/TAS in follow-up commits.
+              </span>
+            )
+          ) : (
+            <span className="text-xs text-amber-700">
+              Not resolved — no coords or state for the subject.
+            </span>
+          )}
+        </div>
+        {data.riskProfile ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+            <HazardCell
+              label="Bushfire"
+              layer={data.riskProfile.bushfire}
+            />
+            <HazardCell label="Flood" layer={data.riskProfile.flood} />
+          </div>
+        ) : (
+          <p className="text-xs text-slate-600">
+            Hazard overlays fire from lat/lng + state. Missing one of
+            those blocks the lookup.
+          </p>
+        )}
+        <p className="mt-2 text-xs text-slate-500">
+          Hazard layers are sourced per-state from the relevant
+          government spatial service. A &ldquo;high&rdquo; or
+          &ldquo;extreme&rdquo; bushfire / flood rating materially
+          affects insurance cost and capital growth — lenders and
+          insurers price it in, so the valuation numbers above need
+          to be read against any red flags here.
+        </p>
+      </section>
+
+      <section className="rounded-lg bg-white border border-slate-200 p-4">
         <h3 className="text-sm font-semibold text-navy mb-2">
           Adjustments applied
         </h3>
@@ -1356,6 +1402,56 @@ function advantageInterpretation(decile: number): {
   if (decile >= 8) return { colour: 'text-teal', word: 'upper tier' };
   if (decile >= 5) return { colour: 'text-navy', word: 'middle' };
   return { colour: 'text-amber-600', word: 'lower tier' };
+}
+
+function HazardCell({
+  label,
+  layer,
+}: {
+  label: string;
+  layer: FullValuationResult['riskProfile'] extends infer R
+    ? R extends { bushfire: infer H }
+      ? H
+      : never
+    : never;
+}) {
+  if (!layer) return null;
+  const { colour, word } = hazardInterpretation(layer.level);
+  return (
+    <div className="rounded-md border border-slate-200 px-3 py-2">
+      <div className="flex items-baseline justify-between">
+        <p className="text-xs text-slate-500">{label}</p>
+        <p className={`text-sm font-semibold ${colour}`}>{word}</p>
+      </div>
+      <p className="text-xs text-slate-600 mt-1">
+        {layer.zone ??
+          (layer.error ? `Not resolved — ${layer.error}` : 'No hazard layer intersects')}
+      </p>
+      {layer.attribution && (
+        <p className="text-xs text-slate-400 mt-1">
+          Source: {layer.attribution.publisher} ·{' '}
+          {layer.attribution.dataset}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function hazardInterpretation(level: string): { colour: string; word: string } {
+  switch (level) {
+    case 'extreme':
+      return { colour: 'text-red-700', word: 'EXTREME' };
+    case 'high':
+      return { colour: 'text-red-600', word: 'HIGH' };
+    case 'moderate':
+      return { colour: 'text-amber-600', word: 'MODERATE' };
+    case 'low':
+      return { colour: 'text-yellow-600', word: 'LOW' };
+    case 'none':
+      return { colour: 'text-teal', word: 'NONE' };
+    default:
+      return { colour: 'text-slate-400', word: 'UNKNOWN' };
+  }
 }
 
 function TenureInline({

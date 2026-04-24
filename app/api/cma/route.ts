@@ -7,6 +7,7 @@ import { fetchSeifaByPoint } from '@/lib/abs/seifa';
 import { computeCMA } from '@/lib/cma/compute';
 import { computeMaxPrice } from '@/lib/cma/maxprice';
 import { nominatimGeocode } from '@/lib/geocode/nominatim';
+import { fetchRiskProfile } from '@/lib/risk';
 import {
   HtagError,
   getComparables,
@@ -23,6 +24,7 @@ import { clientKey, rateLimit } from '@/lib/ratelimit';
 import type {
   FullValuationResult,
   G02Demographics,
+  RiskProfile,
   SeifaProfile,
   TenureProfile,
 } from '@/lib/types';
@@ -152,15 +154,35 @@ export async function POST(req: Request) {
           (r) => r.demographics,
         )
       : Promise.resolve(null);
+    // State hazard overlays: only fire when we both have coords AND
+    // know the subject's state. Internally routed by state to the
+    // matching provider; states without a provider return a
+    // RiskProfile with level:"unknown" so the UI can show a clear
+    // "coverage not yet available" state.
+    const subjectRiskPromise: Promise<RiskProfile | null> =
+      hasCoords && subjectRaw.state
+        ? fetchRiskProfile({
+            latitude: subjectRaw.latitude!,
+            longitude: subjectRaw.longitude!,
+            state: subjectRaw.state,
+          })
+        : Promise.resolve(null);
 
-    const [comparablesRaw, market, subjectTenure, subjectSeifa, subjectG02] =
-      await Promise.all([
-        getComparables(subjectRaw),
-        getMarketContext(subjectRaw),
-        subjectTenurePromise.catch(() => null),
-        subjectSeifaPromise.catch(() => null),
-        subjectG02Promise.catch(() => null),
-      ]);
+    const [
+      comparablesRaw,
+      market,
+      subjectTenure,
+      subjectSeifa,
+      subjectG02,
+      subjectRisk,
+    ] = await Promise.all([
+      getComparables(subjectRaw),
+      getMarketContext(subjectRaw),
+      subjectTenurePromise.catch(() => null),
+      subjectSeifaPromise.catch(() => null),
+      subjectG02Promise.catch(() => null),
+      subjectRiskPromise.catch(() => null),
+    ]);
     const subject: typeof subjectRaw = {
       ...subjectRaw,
       tenureProfile: subjectTenure ?? undefined,
@@ -244,6 +266,7 @@ export async function POST(req: Request) {
       tenureProfile: subjectTenure ?? undefined,
       seifaProfile: subjectSeifa ?? undefined,
       demographics: subjectG02 ?? undefined,
+      riskProfile: subjectRisk ?? undefined,
     };
 
     // How many comps had their per-SA1 tenure resolved, plus the
@@ -297,6 +320,13 @@ export async function POST(req: Request) {
             medianHhdInc: subjectG02.medianHouseholdIncomeWeekly,
             medianRent: subjectG02.medianRentWeekly,
             medianMortgage: subjectG02.medianMortgageMonthly,
+          }
+        : null,
+      risk: subjectRisk
+        ? {
+            provider: subjectRisk.provider,
+            bushfireLevel: subjectRisk.bushfire.level,
+            floodLevel: subjectRisk.flood.level,
           }
         : null,
       compsTenureCoverage: {
@@ -385,6 +415,11 @@ function logValuation(info: {
     medianHhdInc?: number;
     medianRent?: number;
     medianMortgage?: number;
+  } | null;
+  risk: {
+    provider: string | null;
+    bushfireLevel: string;
+    floodLevel: string;
   } | null;
   compsTenureCoverage: {
     total: number;

@@ -490,6 +490,35 @@ export function ValuationReport({
           </>
         )}
 
+        {data.riskProfile && (
+          <>
+            <Text style={styles.sectionHeader}>
+              Hazard &amp; risk overlays
+              {data.riskProfile.provider
+                ? ` (${data.riskProfile.state})`
+                : ` — no provider for ${data.riskProfile.state} yet`}
+            </Text>
+            <View style={styles.kvRow}>
+              <Text style={styles.k}>Bushfire</Text>
+              <Text style={styles.v}>
+                {data.riskProfile.bushfire.level.toUpperCase()}
+                {data.riskProfile.bushfire.zone
+                  ? ` — ${data.riskProfile.bushfire.zone}`
+                  : ''}
+              </Text>
+            </View>
+            <View style={styles.kvRow}>
+              <Text style={styles.k}>Flood</Text>
+              <Text style={styles.v}>
+                {data.riskProfile.flood.level.toUpperCase()}
+                {data.riskProfile.flood.zone
+                  ? ` — ${data.riskProfile.flood.zone}`
+                  : ''}
+              </Text>
+            </View>
+          </>
+        )}
+
         <Text style={styles.sectionHeader}>Adjustments applied</Text>
         <View style={styles.kvRow}>
           <Text style={styles.k}>Cycle stretch</Text>

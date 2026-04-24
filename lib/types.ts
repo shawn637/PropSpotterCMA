@@ -212,6 +212,11 @@ export interface FullValuationResult {
    *  Median income / rent / mortgage / household size. Feeds the
    *  "can the typical household here afford the price" check. */
   demographics?: G02Demographics;
+  /** Hazard + risk overlay profile keyed off the subject's state
+   *  (flood / bushfire / coastal). Populated by the lib/risk/*
+   *  provider matching subject.state. Absent when no provider
+   *  covers the state (yet). */
+  riskProfile?: RiskProfile;
 }
 
 export interface CMARequest {
@@ -281,4 +286,51 @@ export interface G02Demographics {
   medianRentWeekly?: number;
   medianMortgageMonthly?: number;
   averageHouseholdSize?: number;
+}
+
+/**
+ * Hazard level for a single risk layer (flood, bushfire, coastal).
+ * Ordered from safest to riskiest for sorting + colour coding.
+ */
+export type HazardLevel =
+  | 'none'
+  | 'low'
+  | 'moderate'
+  | 'high'
+  | 'extreme'
+  | 'unknown';
+
+export interface HazardLayerResult {
+  level: HazardLevel;
+  /** Category / zone name the source dataset returns — e.g. "Bushfire
+   *  Prone Category 1", "Flood Planning Area - 1% AEP". Surfaced in
+   *  the UI + PDF so users can see the canonical classification. */
+  zone?: string;
+  /** One-line human-readable note when the source adds colour beyond
+   *  level + zone (flood depth, management overlay, etc.). */
+  notes?: string;
+  /** Only populated when the fetch / parse failed. `level:"unknown"`
+   *  is distinct from an error — unknown means no data for the point,
+   *  error means we couldn't even attempt a lookup. */
+  error?: string;
+  /** Dataset attribution — publisher + dataset name + source URL.
+   *  Shown in the UI so users can audit. */
+  attribution?: { publisher: string; dataset: string; url: string };
+}
+
+/**
+ * Per-state hazard / risk overlay bundle. Populated by the provider
+ * matching the subject's state in lib/risk/index.ts. At least
+ * `flood` and `bushfire` are always present (even if as
+ * level:"unknown" when state has no published layer). `coastal`
+ * surfaces only for states with an active coastal-erosion dataset.
+ */
+export interface RiskProfile {
+  state: string;
+  flood: HazardLayerResult;
+  bushfire: HazardLayerResult;
+  coastal?: HazardLayerResult;
+  /** Which state provider handled this lookup. Null = no provider
+   *  registered for the subject's state yet. */
+  provider: 'nsw' | 'vic' | 'qld' | 'tas' | null;
 }

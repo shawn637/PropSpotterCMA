@@ -61,6 +61,7 @@ export async function POST(req: Request) {
       tenureProfile: data.tenureProfile,
       seifaProfile: data.seifaProfile,
       demographics: data.demographics,
+      riskProfile: data.riskProfile,
     });
 
     console.log(

@@ -6,6 +6,7 @@ import type {
   MarketContext,
   MaxPriceResult,
   PropertyDetails,
+  RiskProfile,
   SeifaProfile,
   TenureProfile,
   VendorAssessment,
@@ -210,6 +211,7 @@ export async function generateNarrative(args: {
   tenureProfile?: TenureProfile;
   seifaProfile?: SeifaProfile;
   demographics?: G02Demographics;
+  riskProfile?: RiskProfile;
 }): Promise<NarrativeResult> {
   if (!hasApiKey()) return { text: fallbackNarrative(args) };
 
@@ -230,6 +232,11 @@ export async function generateNarrative(args: {
   const g02Line = g02
     ? `- Demographics (ABS 2021 Census G02, SA1 medians): median household income $${g02.medianHouseholdIncomeWeekly ?? '?'}/wk, median rent $${g02.medianRentWeekly ?? '?'}/wk, median mortgage $${g02.medianMortgageMonthly ?? '?'}/month, average household size ${g02.averageHouseholdSize ?? '?'}, median age ${g02.medianAge ?? '?'}`
     : '- Demographics: not resolved';
+
+  const risk = args.riskProfile;
+  const riskLine = risk
+    ? `- Hazard / risk overlays (${risk.provider ?? 'no provider'}): bushfire=${risk.bushfire.level}${risk.bushfire.zone ? ` (${risk.bushfire.zone})` : ''}; flood=${risk.flood.level}${risk.flood.zone ? ` (${risk.flood.zone})` : ''}`
+    : '- Hazard / risk overlays: not resolved';
 
   // Up to 8 comp lines so the model can name specific comps in the
   // narrative rather than treating them as a faceless "set". Include
@@ -259,7 +266,7 @@ Paragraph 1: describe the subject property, including its visual profile if prov
 
 Paragraph 2: comment on the COMPARABLE SET. Reference at least two specific comparables by street address and explain what they tell us — e.g. "a renovated single-storey on X Street sold for Y; a dated comparable on Z sold for less." Call out when the vision data shows meaningful differences between subject and comps (renovated kitchen vs dated, pool asymmetry, different landscaping tier). Do not invent condition data — only reference what's supplied in the Data section below.
 
-Paragraph 3: explain the market context (cycle stage, growth, typical days on market vs actual) AND the neighbourhood DNA at SA1 granularity — tenure mix, SEIFA deciles, and G02 income/rent/mortgage medians. Give this a concrete interpretation for an investor:
+Paragraph 3: explain the market context (cycle stage, growth, typical days on market vs actual) AND the neighbourhood DNA at SA1 granularity — tenure mix, SEIFA deciles, G02 income/rent/mortgage medians, AND any state hazard / risk overlay findings. If the risk layer shows bushfire or flood at "high" or "extreme", lead the paragraph with that fact — it materially affects insurance cost and capital growth. Give this a concrete interpretation for an investor:
   * Tenure mix: high owner-occupancy reads as stable family-dominated; high private rental as investor-heavy or transient; meaningful public-housing share changes the risk profile.
   * SEIFA: IRSAD decile ≥8 signals established upper-tier pocket; decile 5-7 is typical middle suburbia; ≤4 flags disadvantage. Call out divergence between IRSAD and IEO (e.g. high IEO + lower IRSAD = gentrifying with new professional inflow).
   * G02 medians: compare median household income to median weekly rent and monthly mortgage — use this to note whether local incomes support the pricing.
@@ -273,6 +280,7 @@ ${subjectVisionLine}
 ${tenureLine}
 ${seifaLine}
 ${g02Line}
+${riskLine}
 - CMA fair value: $${args.cma.fairValue.toLocaleString()} (range $${args.cma.fairValueLow.toLocaleString()}-$${args.cma.fairValueHigh.toLocaleString()}, dispersion ${(args.cma.dispersion * 100).toFixed(1)}%)
 - Comparables used: ${args.cma.comparables.length}
 - Comparable set:
